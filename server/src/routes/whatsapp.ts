@@ -39,7 +39,15 @@ function generateMcpConfig(): string {
 async function getWhatsAppService() {
   if (!whatsappService) {
     // Import dynamically to avoid loading Puppeteer on every server start
-    const module = await import('../../../whatsapp/service.js');
+    // WhatsApp module is optional - not included in npm package
+    // Use variable path to prevent TypeScript from checking at compile time
+    const waPath = '../../../whatsapp/service.js';
+    let module: any;
+    try {
+      module = await import(/* webpackIgnore: true */ waPath);
+    } catch (err) {
+      throw new Error('WhatsApp integration not available. Install whatsapp module separately.');
+    }
     whatsappService = module.whatsappService;
 
     // Set up user lookup

@@ -237,14 +237,15 @@ app.use('/api/mcps', mcpsRouter);
 app.use('/api/apis', apisRouter);
 app.use('/api/whatsapp', whatsappRouter);
 
-// Image upload for chat — saves base64 image to temp file, returns path
-const UPLOAD_DIR = '/tmp/chat-images';
+// File upload for chat — saves base64 file to temp dir, returns path
+const UPLOAD_DIR = '/tmp/chat-uploads';
 app.post('/api/upload/image', (req, res) => {
   const { data, filename } = req.body; // data = base64 string, filename = original name
   if (!data) return res.status(400).json({ error: 'data (base64) required' });
   if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-  const ext = (filename || 'image.png').split('.').pop() || 'png';
-  const name = `img-${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
+  const ext = (filename || 'file').split('.').pop() || 'bin';
+  const prefix = ext === 'csv' ? 'csv' : 'img';
+  const name = `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
   const filePath = path.join(UPLOAD_DIR, name);
   const buffer = Buffer.from(data, 'base64');
   fs.writeFileSync(filePath, buffer);

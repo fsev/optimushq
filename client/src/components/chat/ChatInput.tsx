@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { ArrowUp, Square, X, ChevronDown, Sparkles, Check, Eye, MessageSquare, Zap } from 'lucide-react';
+import { ArrowUp, Square, X, ChevronDown, Sparkles, Check, Eye, MessageSquare, Zap, FileSpreadsheet } from 'lucide-react';
 import { api } from '../../api/http';
 import type { PermissionMode } from '../../../../shared/types';
 
@@ -8,6 +8,13 @@ interface PendingImage {
   preview: string; // object URL for display
   data: string;    // base64 data
 }
+
+interface PendingFile {
+  name: string;
+  data: string;    // base64 data
+}
+
+const ALLOWED_FILE_TYPES = ['text/csv', 'application/vnd.ms-excel'];
 
 const MODELS = [
   { value: 'sonnet', label: 'Sonnet', desc: 'Balanced speed and intelligence' },
@@ -35,6 +42,7 @@ interface Props {
 export default function ChatInput({ onSend, onStop, streaming, disabled, defaultModel, defaultThinking, defaultMode, sessionId }: Props) {
   const [input, setInput] = useState('');
   const [images, setImages] = useState<PendingImage[]>([]);
+  const [files, setFiles] = useState<PendingFile[]>([]);
   const [uploading, setUploading] = useState(false);
   const [model, setModel] = useState(defaultModel || 'sonnet');
   const [thinking, setThinking] = useState(defaultThinking || false);
@@ -79,20 +87,27 @@ export default function ChatInput({ onSend, onStop, streaming, disabled, default
     return () => document.removeEventListener('mousedown', handler);
   }, [showModeMenu]);
 
-  const addImageFiles = useCallback(async (files: File[]) => {
-    const imageFiles = files.filter(f => f.type.startsWith('image/'));
-    if (imageFiles.length === 0) return;
+  const addFiles = useCallback(async (incoming: File[]) => {
+    const imageFiles = incoming.filter(f => f.type.startsWith('image/'));
+    const csvFiles = incoming.filter(f => f.name.endsWith('.csv') || ALLOWED_FILE_TYPES.includes(f.type));
 
-    const newImages: PendingImage[] = [];
-    for (const file of imageFiles) {
-      const data = await fileToBase64(file);
-      newImages.push({
-        name: file.name,
-        preview: URL.createObjectURL(file),
-        data,
-      });
+    if (imageFiles.length > 0) {
+      const newImages: PendingImage[] = [];
+      for (const file of imageFiles) {
+        const data = await fileToBase64(file);
+        newImages.push({ name: file.name, preview: URL.createObjectURL(file), data });
+      }
+      setImages(prev => [...prev, ...newImages]);
     }
-    setImages(prev => [...prev, ...newImages]);
+
+    if (csvFiles.length > 0) {
+      const newFiles: PendingFile[] = [];
+      for (const file of csvFiles) {
+        const data = await fileToBase64(file);
+        newFiles.push({ name: file.name, data });
+      }
+      setFiles(prev => [...prev, ...newFiles]);
+    }
   }, []);
 
   const removeImage = useCallback((index: number) => {
@@ -103,33 +118,42 @@ export default function ChatInput({ onSend, onStop, streaming, disabled, default
     });
   }, []);
 
+  const removeFile = useCallback((index: number) => {
+    setFiles(prev => prev.filter((_, i) => i !== index));
+  }, []);
+
   const handleSubmit = async () => {
-    if ((!input.trim() && images.length === 0) || disabled) return;
+    if ((!input.trim() && images.length === 0 && files.length === 0) || disabled) return;
 
-    let imagePaths: string[] | undefined;
+    let attachmentPaths: string[] | undefined;
+    const allAttachments = [
+      ...images.map(img => ({ data: img.data, filename: img.name })),
+      ...files.map(f => ({ data: f.data, filename: f.name })),
+    ];
 
-    if (images.length > 0) {
+    if (allAttachments.length > 0) {
       setUploading(true);
       try {
         const uploads = await Promise.all(
-          images.map(img =>
-            api.post<{ path: string }>('/upload/image', { data: img.data, filename: img.name })
+          allAttachments.map(a =>
+            api.post<{ path: string }>('/upload/image', { data: a.data, filename: a.filename })
           )
         );
-        imagePaths = uploads.map(u => u.path);
+        attachmentPaths = uploads.map(u => u.path);
       } catch (err) {
-        console.error('Failed to upload images:', err);
+        console.error('Failed to upload files:', err);
         setUploading(false);
         return;
       }
       setUploading(false);
     }
 
-    onSend(input.trim() || 'See attached image(s)', imagePaths, model, thinking, mode);
+    const fallback = files.length > 0 ? 'See attached file(s)' : 'See attached image(s)';
+    onSend(input.trim() || fallback, attachmentPaths, model, thinking, mode);
     setInput('');
-    // Clean up previews
     images.forEach(img => URL.revokeObjectURL(img.preview));
     setImages([]);
+    setFiles([]);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -143,18 +167,18 @@ export default function ChatInput({ onSend, onStop, streaming, disabled, default
     const items = e.clipboardData?.items;
     if (!items) return;
 
-    const files: File[] = [];
+    const pastedFiles: File[] = [];
     for (let i = 0; i < items.length; i++) {
-      if (items[i].type.startsWith('image/')) {
+      if (items[i].type.startsWith('image/') || items[i].type === 'text/csv') {
         const file = items[i].getAsFile();
-        if (file) files.push(file);
+        if (file) pastedFiles.push(file);
       }
     }
-    if (files.length > 0) {
+    if (pastedFiles.length > 0) {
       e.preventDefault();
-      addImageFiles(files);
+      addFiles(pastedFiles);
     }
-  }, [addImageFiles]);
+  }, [addFiles]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -164,9 +188,9 @@ export default function ChatInput({ onSend, onStop, streaming, disabled, default
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    const files = Array.from(e.dataTransfer.files);
-    addImageFiles(files);
-  }, [addImageFiles]);
+    const droppedFiles = Array.from(e.dataTransfer.files);
+    addFiles(droppedFiles);
+  }, [addFiles]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -177,7 +201,7 @@ export default function ChatInput({ onSend, onStop, streaming, disabled, default
     }
   }, [input]);
 
-  const canSend = (input.trim() || images.length > 0) && !disabled && !uploading;
+  const canSend = (input.trim() || images.length > 0 || files.length > 0) && !disabled && !uploading;
   const currentModel = MODELS.find(m => m.value === model) || MODELS[0];
   const currentMode = MODES.find(m => m.value === mode) || MODES[0];
   const ModeIcon = currentMode.icon;
@@ -191,11 +215,11 @@ export default function ChatInput({ onSend, onStop, streaming, disabled, default
     >
       <div className="max-w-4xl mx-auto">
         <div className="bg-[#161b22] border border-gray-700/50 rounded-xl focus-within:border-accent-500/50 transition-colors">
-          {/* Image previews */}
-          {images.length > 0 && (
+          {/* Attachment previews */}
+          {(images.length > 0 || files.length > 0) && (
             <div className="flex gap-2 px-4 pt-3 flex-wrap">
               {images.map((img, i) => (
-                <div key={i} className="relative group">
+                <div key={`img-${i}`} className="relative group">
                   <img
                     src={img.preview}
                     alt={img.name}
@@ -206,6 +230,18 @@ export default function ChatInput({ onSend, onStop, streaming, disabled, default
                     className="absolute -top-1.5 -right-1.5 bg-gray-800 border border-gray-600 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
                   >
                     <X size={10} className="text-gray-300" />
+                  </button>
+                </div>
+              ))}
+              {files.map((f, i) => (
+                <div key={`file-${i}`} className="relative group flex items-center gap-1.5 bg-[#0d1117] border border-gray-700 rounded-lg px-3 py-2">
+                  <FileSpreadsheet size={14} className="text-green-400 flex-shrink-0" />
+                  <span className="text-xs text-gray-300 max-w-[120px] truncate">{f.name}</span>
+                  <button
+                    onClick={() => removeFile(i)}
+                    className="text-gray-500 hover:text-gray-300 transition-colors"
+                  >
+                    <X size={12} />
                   </button>
                 </div>
               ))}

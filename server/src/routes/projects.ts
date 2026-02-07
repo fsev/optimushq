@@ -103,6 +103,13 @@ router.delete('/:id', (req: Request, res: Response) => {
     try {
       rmSync(project.path, { recursive: true, force: true });
     } catch { /* ignore */ }
+
+    // Clean up Claude Code cache directories
+    const cacheSlug = project.path.replace(/\//g, '-');
+    const claudeProjectCache = join('/home/claude/.claude/projects', cacheSlug);
+    const claudeCliCache = join('/home/claude/.cache/claude-cli-nodejs', cacheSlug);
+    try { rmSync(claudeProjectCache, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSync(claudeCliCache, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
   db.prepare('DELETE FROM projects WHERE id = ? AND user_id = ?').run(req.params.id, userId);

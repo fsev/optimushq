@@ -364,11 +364,6 @@ export function spawnForSession(sessionId: string, content: string, images?: str
 
   streamingSessions.add(sessionId);
 
-  // Notify client of active skills
-  if (ctx.activeSkills.length > 0) {
-    broadcastToSessionOwner(sessionId, { type: 'chat:skills', sessionId, skills: ctx.activeSkills });
-  }
-
   console.log(`[CHAT] Spawning claude... projectPath=${projectPath}`);
   try {
   spawnClaude(
@@ -397,6 +392,10 @@ export function spawnForSession(sessionId: string, content: string, images?: str
             tool: event.tool || '',
             input: event.toolInput || {},
           });
+          // When agent loads a skill, notify the client
+          if (event.tool === 'mcp__project-manager__use_skill' && event.toolInput?.name) {
+            broadcastToSessionOwner(sessionId, { type: 'chat:skill', sessionId, skill: event.toolInput.name as string });
+          }
           break;
 
         case 'tool_result': {

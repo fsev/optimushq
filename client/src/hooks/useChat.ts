@@ -88,8 +88,8 @@ export function useChat(sessionId: string | null) {
       // Only update UI for the currently viewed session
       if (msg.sessionId !== sessionId) return;
 
-      if (msg.type === 'chat:skills') {
-        setActiveSkills(msg.skills);
+      if (msg.type === 'chat:skill') {
+        setActiveSkills(prev => prev.includes(msg.skill) ? prev : [...prev, msg.skill]);
         return;
       }
 

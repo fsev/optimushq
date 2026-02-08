@@ -12,7 +12,6 @@ interface ContextResult {
   allowedTools?: string[];
   disallowedTools?: string[];
   maxTurns?: number;
-  activeSkills: string[];
 }
 
 // Write/destructive tools blocked in Explore mode
@@ -273,6 +272,5 @@ This is a hard constraint. Do not combine your confirmation question with tool e
     allowedTools: allowedTools?.length ? allowedTools : undefined,
     disallowedTools: disallowedTools?.length ? disallowedTools : undefined,
     maxTurns: undefined,
-    activeSkills: skills.map(s => s.name),
   };
 }

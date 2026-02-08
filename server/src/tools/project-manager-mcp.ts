@@ -27,8 +27,9 @@ db.pragma('foreign_keys = ON');
 
 const PROJECTS_ROOT = '/home/claude/projects';
 
-// Get user_id from env (passed by spawn.ts)
+// Get user_id and session_id from env (passed by spawn.ts)
 const USER_ID = process.env.USER_ID || null;
+const SESSION_ID = process.env.SESSION_ID || null;
 
 function slugify(name: string): string {
   return name
@@ -255,6 +256,17 @@ const TOOLS = [
         source_url: { type: 'string', description: 'Source URL (npm package, GitHub repo) for reference' },
       },
       required: ['name', 'command', 'args'],
+    },
+  },
+  {
+    name: 'use_skill',
+    description: 'Load the full prompt for an enabled skill by name. Use this when a skill is relevant to the current task. Returns the complete skill instructions.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Skill name (case-insensitive)' },
+      },
+      required: ['name'],
     },
   },
 ];
@@ -814,6 +826,24 @@ function handleToolCall(id: number | string, params: { name: string; arguments?:
 
         const fileContent = readFileSync(resolved, 'utf-8');
         return success(id, fileContent);
+      }
+
+      case 'use_skill': {
+        const skillName = args.name as string;
+        if (!skillName) throw new Error('name is required');
+        if (!SESSION_ID) throw new Error('SESSION_ID not available in environment');
+
+        const skill = db.prepare(`
+          SELECT sk.name, sk.prompt FROM skills sk
+          JOIN session_skills ss ON ss.skill_id = sk.id
+          WHERE LOWER(sk.name) = LOWER(?) AND ss.session_id = ? AND ss.enabled = 1
+        `).get(skillName, SESSION_ID) as { name: string; prompt: string } | undefined;
+
+        if (!skill) {
+          throw new Error(`Skill not found or not enabled for this session: ${skillName}`);
+        }
+
+        return success(id, `# Skill: ${skill.name}\n\n${skill.prompt}`);
       }
 
       default:

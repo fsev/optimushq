@@ -116,6 +116,7 @@ export function spawnClaude(
   if (sessionUserId) {
     spawnEnv.USER_ID = sessionUserId;
   }
+  spawnEnv.SESSION_ID = sessionId;
   // Pass project path for hook-based path validation
   if (projectPath) {
     spawnEnv.PROJECT_PATH = projectPath;

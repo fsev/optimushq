@@ -101,16 +101,18 @@ export function assembleContext(sessionId: string, userMessage: string, modelOve
 - Use proper paragraph spacing between ideas
 - Keep responses conversational and natural, not overly structured`);
 
-  // Enabled skills
+  // Enabled skills -- only include names + descriptions in the system prompt.
+  // Full prompts are loaded on demand via the use_skill MCP tool.
   const skills = db.prepare(`
-    SELECT sk.name, sk.prompt FROM skills sk
+    SELECT sk.name, sk.description FROM skills sk
     JOIN session_skills ss ON ss.skill_id = sk.id
     WHERE ss.session_id = ? AND ss.enabled = 1
     ORDER BY sk.name ASC
-  `).all(sessionId) as Pick<Skill, 'name' | 'prompt'>[];
+  `).all(sessionId) as Pick<Skill, 'name' | 'description'>[];
 
   if (skills.length > 0) {
-    systemParts.push('Active skills:\n' + skills.map(s => `- ${s.name}: ${s.prompt}`).join('\n'));
+    const listing = skills.map(s => `- ${s.name}: ${s.description || 'No description'}`).join('\n');
+    systemParts.push(`Available skills (use the use_skill MCP tool to load a skill when relevant):\n${listing}`);
   }
 
   // Enabled APIs
@@ -174,7 +176,8 @@ export function assembleContext(sessionId: string, userMessage: string, modelOve
 - delegate_task: Delegate work to another agent in any project. Creates a session and sends instructions asynchronously.
 - send_message: Send a follow-up message to any existing session.
 - create_skill: Create a new skill for agents. Provide name, prompt (instructions), and optional description/icon/scope.
-- create_mcp: Create a new MCP server. Provide name, command, args (JSON array), and optional env (JSON object with API key placeholders).`);
+- create_mcp: Create a new MCP server. Provide name, command, args (JSON array), and optional env (JSON object with API key placeholders).
+- use_skill: Load the full prompt for an enabled skill by name. Call this when a skill listed above is relevant to the current task.`);
 
   // Recent memory entries for this project
   try {

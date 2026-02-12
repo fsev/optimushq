@@ -296,8 +296,7 @@ export function setupWebSocket(wss: WebSocketServer) {
           send(ws, { type: 'chat:error', sessionId: msg.sessionId, error: err.message });
         }
       } else if (msg.type === 'chat:stop') {
-        // Clear the queue so queued messages are discarded on stop
-        messageQueue.delete(msg.sessionId);
+        // Keep queued messages - they will be processed after the agent stops
         killProcess(msg.sessionId);
       }
     });
@@ -427,9 +426,9 @@ export function spawnForSession(sessionId: string, content: string, images?: str
               isInterrupted ? 1 : 0,
             );
 
-          // Check if there are queued messages remaining
+          // Check if there are queued messages remaining (process even if interrupted)
           const queue = messageQueue.get(sessionId) || [];
-          const hasMore = !isInterrupted && queue.length > 0;
+          const hasMore = queue.length > 0;
 
           broadcastToSessionOwner(sessionId, {
             type: 'chat:done',
@@ -462,8 +461,16 @@ export function spawnForSession(sessionId: string, content: string, images?: str
               setTimeout(() => spawnForSession(sessionId, next.content, next.images, next.model, next.thinking, next.mode), 0);
             }
           } else {
-            // Interrupted: discard any queued messages
-            messageQueue.delete(sessionId);
+            // Interrupted: still process any queued messages
+            const interruptedQueue = messageQueue.get(sessionId) || [];
+            if (interruptedQueue.length > 0) {
+              const next = interruptedQueue.shift()!;
+              if (interruptedQueue.length === 0) {
+                messageQueue.delete(sessionId);
+              }
+              saveUserMessage(sessionId, next.content);
+              setTimeout(() => spawnForSession(sessionId, next.content, next.images, next.model, next.thinking, next.mode), 0);
+            }
           }
           break;
         }

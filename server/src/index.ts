@@ -24,6 +24,7 @@ import mcpsRouter from './routes/mcps.js';
 import apisRouter from './routes/apis.js';
 import internalRouter from './routes/internal.js';
 import whatsappRouter from './routes/whatsapp.js';
+import mcpBridgeRouter from './routes/mcp-bridge.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3001;
@@ -224,6 +225,9 @@ app.use('/api/internal', (req, res, next) => {
   }
   next();
 }, internalRouter);
+
+// MCP bridge (before auth middleware — used by Docker agent containers via network)
+app.use('/api/mcp-bridge', mcpBridgeRouter);
 
 // Health check (before auth middleware so it's always accessible)
 app.get('/api/health', (_req, res) => res.json({ ok: true }));

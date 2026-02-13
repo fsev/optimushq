@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  optimushq:
+    build:
+      context: .
+      dockerfile: docker/platform/Dockerfile
+    container_name: optimushq
+    ports:
+      - "3001:3001"
+    group_add:
+      - ${DOCKER_GID}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_PROJECTS_DIR}:/projects
+      - optimushq-data:/app/data
+      - ${HOME}/.claude:/home/node/.claude:ro
+      - ${HOME}/.claude.json:/home/node/.claude.json:ro
+      - ${HOME}/.gitconfig:/home/node/.gitconfig:ro
+      - ${HOME}/.config/gh:/home/node/.config/gh:ro
+    environment:
+      - AUTH_USER=${AUTH_USER:-admin}
+      - AUTH_PASS=${AUTH_PASS:-changeme}
+      - PORT=3001
+      - AGENT_MODE=docker
+      - AGENT_DEFAULT_IMAGE=claude-agent-react
+      - DOCKER_GID=${DOCKER_GID}
+      - HOST_PROJECTS_DIR=${HOST_PROJECTS_DIR}
+      - HOST_CLAUDE_DIR=${HOME}/.claude
+      - HOST_CLAUDE_JSON=${HOME}/.claude.json
+      - HOST_GH_DIR=${HOME}/.config/gh
+      - HOST_AWS_DIR=${HOME}/.aws
+      - HOST_GITCONFIG=${HOME}/.gitconfig
+      - GIT_AUTHOR_NAME=${GIT_AUTHOR_NAME:-Fen}
+      - GIT_AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-f.sev16@gmail.com}
+      - GIT_COMMITTER_NAME=${GIT_COMMITTER_NAME:-Fen}
+      - GIT_COMMITTER_EMAIL=${GIT_COMMITTER_EMAIL:-f.sev16@gmail.com}
+      - CHROME_HOST=chrome
+      - CHROME_PORT=9222
+      # Agent container security settings
+      # AGENT_RUNTIME: set to "sysbox-runc" for isolated Docker-in-Docker per agent
+      - AGENT_RUNTIME=${AGENT_RUNTIME:-}
+      # AGENT_DOCKER_ACCESS: set to "socket" to mount host Docker socket into agents (less secure)
+      - AGENT_DOCKER_ACCESS=${AGENT_DOCKER_ACCESS:-}
+      # Resource limits for agent containers (override defaults)
+      - AGENT_MEMORY_LIMIT=${AGENT_MEMORY_LIMIT:-}
+      - AGENT_CPU_LIMIT=${AGENT_CPU_LIMIT:-}
+      - AGENT_PIDS_LIMIT=${AGENT_PIDS_LIMIT:-}
+    depends_on:
+      - chrome
+    restart: unless-stopped
+    networks:
+      - optimushq-net
+
+  chrome:
+    image: zenika/alpine-chrome:latest
+    container_name: optimushq-chrome
+    command: >
+      --no-sandbox
+      --disable-gpu
+      --remote-debugging-address=0.0.0.0
+      --remote-debugging-port=9222
+      --disable-dev-shm-usage
+    ports:
+      - "9222:9222"
+    restart: unless-stopped
+    networks:
+      - optimushq-net
+
+volumes:
+  optimushq-data:
+
+networks:
+  optimushq-net:
+    name: optimushq-net
+    driver: bridge

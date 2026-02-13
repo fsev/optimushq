@@ -21,6 +21,41 @@ function toHostPath(containerProjectPath: string): string {
   return `${process.env.HOST_PROJECTS_DIR}/${relative}`;
 }
 
+// ---- Resource limit helpers ------------------------------------------------
+
+function parseMemoryLimit(): number {
+  const raw = process.env.AGENT_MEMORY_LIMIT;
+  if (!raw) return 4 * 1024 * 1024 * 1024; // 4 GB default
+  const num = parseInt(raw, 10);
+  return isNaN(num) ? 4 * 1024 * 1024 * 1024 : num;
+}
+
+function parseCpuLimit(): { CpuQuota: number; CpuPeriod: number } {
+  const raw = process.env.AGENT_CPU_LIMIT;
+  const cpus = raw ? parseFloat(raw) : 2;
+  const period = 100_000;
+  return { CpuQuota: Math.round((isNaN(cpus) ? 2 : cpus) * period), CpuPeriod: period };
+}
+
+function parsePidsLimit(): number {
+  const raw = process.env.AGENT_PIDS_LIMIT;
+  if (!raw) return 512;
+  const num = parseInt(raw, 10);
+  return isNaN(num) ? 512 : num;
+}
+
+// ---- Docker socket / runtime helpers ---------------------------------------
+
+function shouldMountDockerSocket(): boolean {
+  return process.env.AGENT_DOCKER_ACCESS === 'socket';
+}
+
+function getRuntime(): string | undefined {
+  return process.env.AGENT_RUNTIME || undefined;
+}
+
+// ---- Main spawn function ---------------------------------------------------
+
 export async function spawnDockerAgent(
   sessionId: string,
   args: string[],
@@ -38,17 +73,22 @@ export async function spawnDockerAgent(
 
   // Build binds using HOST paths (critical for sibling container pattern)
   const hostProjectDir = opts.projectPath ? toHostPath(opts.projectPath) : null;
-  const binds: string[] = [
-    '/var/run/docker.sock:/var/run/docker.sock',
-  ];
+  const binds: string[] = [];
+
+  // Docker socket — only when explicitly opted in
+  if (shouldMountDockerSocket()) {
+    binds.push('/var/run/docker.sock:/var/run/docker.sock');
+  }
 
   if (hostProjectDir) {
     binds.push(`${hostProjectDir}:/workspace`);
   }
 
-  // Credential mounts from HOST paths
+  // ---- Credential mounts (hardened) ----------------------------------------
+  // Mount only the subscription auth file read-only instead of the whole dir.
+  // The agent gets its own writable .claude/ for logs/cache.
   if (process.env.HOST_CLAUDE_DIR) {
-    binds.push(`${process.env.HOST_CLAUDE_DIR}:/home/node/.claude`);
+    binds.push(`${process.env.HOST_CLAUDE_DIR}/.credentials.json:/home/node/.claude/.credentials.json:ro`);
   }
   if (process.env.HOST_CLAUDE_JSON) {
     binds.push(`${process.env.HOST_CLAUDE_JSON}:/home/node/.claude.json:ro`);
@@ -78,7 +118,9 @@ export async function spawnDockerAgent(
     }
   }
 
+  // GroupAdd for docker GID only when socket is mounted
   const dockerGid = process.env.DOCKER_GID;
+  const groupAdd = (shouldMountDockerSocket() && dockerGid) ? [dockerGid] : [];
 
   // Ensure the Docker network exists (create if needed so agents work
   // even when the platform is started outside docker-compose)
@@ -94,9 +136,16 @@ export async function spawnDockerAgent(
     console.error(`[DOCKER-SPAWN] Network check/create failed:`, err.message);
   }
 
+  // Resource limits
+  const memoryLimit = parseMemoryLimit();
+  const { CpuQuota, CpuPeriod } = parseCpuLimit();
+  const pidsLimit = parsePidsLimit();
+  const runtime = getRuntime();
+
   console.log(`[DOCKER-SPAWN] Creating container ${containerName} from image ${image}`);
   console.log(`[DOCKER-SPAWN] Binds: ${binds.join(', ')}`);
-  console.log(`[DOCKER-SPAWN] Cmd: claude ${args.map(a => a.length > 80 ? a.substring(0, 80) + '...' : a).join(' ')}`);
+  console.log(`[DOCKER-SPAWN] Limits: mem=${memoryLimit}, cpuQuota=${CpuQuota}, pids=${pidsLimit}, runtime=${runtime || 'default'}`);
+  console.log(`[DOCKER-SPAWN] Docker socket: ${shouldMountDockerSocket() ? 'yes' : 'no'}`);
 
   // Remove any leftover container with the same name
   try {
@@ -107,10 +156,19 @@ export async function spawnDockerAgent(
     // Container doesn't exist — expected
   }
 
+  // Container CMD: write MCP proxy script and config from env vars, then exec claude
+  const cmd = [
+    'sh', '-c',
+    'echo "$MCP_PROXY_SCRIPT" > /tmp/mcp-proxy.js && ' +
+    'echo "$MCP_CONFIG" > /tmp/mcp-config.json && ' +
+    'exec claude "$@"',
+    '--', ...args,
+  ];
+
   const container = await docker.createContainer({
     name: containerName,
     Image: image,
-    Cmd: ['claude', ...args],
+    Cmd: cmd,
     WorkingDir: '/workspace',
     Env: containerEnv,
     AttachStdout: true,
@@ -125,8 +183,14 @@ export async function spawnDockerAgent(
     HostConfig: {
       Binds: binds,
       AutoRemove: true,
-      GroupAdd: dockerGid ? [dockerGid] : [],
+      GroupAdd: groupAdd,
       NetworkMode: 'optimushq-net',
+      Init: true,
+      Memory: memoryLimit,
+      CpuQuota,
+      CpuPeriod,
+      PidsLimit: pidsLimit,
+      ...(runtime ? { Runtime: runtime } : {}),
     },
   });
 

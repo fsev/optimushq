@@ -6,6 +6,7 @@ import { getDb } from '../db/connection.js';
 import { getToken } from '../routes/settings.js';
 import { decryptEnv } from '../routes/mcps.js';
 import { spawnDockerAgent, type DockerSpawnResult } from './docker-spawn.js';
+import { MCP_PROXY_SCRIPT } from './mcp-proxy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MCP_CONFIG_PATH = path.join(__dirname, '..', '..', '..', 'mcp-config.json');
@@ -53,6 +54,54 @@ function generateMcpConfig(): string {
   return MCP_CONFIG_PATH;
 }
 
+/**
+ * Generate MCP config JSON for Docker agent containers.
+ *
+ * Replaces the internal project-manager entry with a proxy entry that
+ * calls back to the platform via HTTP, and rewrites Chrome DevTools
+ * URLs for Docker networking.  Returns a JSON string (not a file path).
+ */
+function generateDockerMcpConfig(sessionId: string, userId: string | null): string {
+  const db = getDb();
+  const servers = db.prepare('SELECT name, command, args, env FROM mcp_servers WHERE enabled = 1').all() as {
+    name: string; command: string; args: string; env: string;
+  }[];
+
+  const mcpServers: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};
+  const chromeHost = process.env.CHROME_HOST || 'chrome';
+  const chromePort = process.env.CHROME_PORT || '9222';
+
+  for (const s of servers) {
+    const key = s.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
+    // Replace internal project-manager with the HTTP proxy
+    if (key === 'project-manager') {
+      mcpServers[key] = { command: 'node', args: ['/tmp/mcp-proxy.js'] };
+      continue;
+    }
+
+    let parsedArgs = JSON.parse(s.args) as string[];
+
+    // Rewrite Chrome DevTools browserUrl for Docker networking
+    if (key === 'chrome-devtools') {
+      parsedArgs = parsedArgs.map(arg =>
+        arg.replace(/http:\/\/127\.0\.0\.1:\d+/, `http://${chromeHost}:${chromePort}`)
+          .replace(/http:\/\/localhost:\d+/, `http://${chromeHost}:${chromePort}`)
+      );
+    }
+
+    const entry: { command: string; args: string[]; env?: Record<string, string> } = {
+      command: s.command,
+      args: parsedArgs,
+    };
+    const env = decryptEnv(s.env);
+    if (Object.keys(env).length > 0) entry.env = env;
+    mcpServers[key] = entry;
+  }
+
+  return JSON.stringify({ mcpServers }, null, 2);
+}
+
 export interface SpawnOptions {
   systemPrompt: string;
   model?: string;
@@ -86,8 +135,12 @@ export function spawnClaude(
   // Kill any existing process for this session
   killProcess(sessionId);
 
-  // Generate mcp-config.json from enabled MCP servers in DB
-  const mcpConfigPath = generateMcpConfig();
+  // In Docker mode, MCP config is delivered via env var and written to
+  // /tmp/mcp-config.json inside the container.  In bare-metal mode,
+  // we write the config to a file on disk.
+  const mcpConfigPath = isDockerMode()
+    ? '/tmp/mcp-config.json'   // container-internal path
+    : generateMcpConfig();     // host file path
 
   const args = [
     '--print',
@@ -145,10 +198,15 @@ function spawnClaudeDocker(
   const sessionOwner = db.prepare('SELECT user_id FROM sessions WHERE id = ?').get(sessionId) as { user_id: string } | undefined;
   const sessionUserId = sessionOwner?.user_id;
 
+  // Generate Docker-specific MCP config (uses HTTP proxy instead of stdio)
+  const mcpConfigJson = generateDockerMcpConfig(sessionId, sessionUserId ?? null);
+
   // Build env vars to pass into the container
   const containerEnv: Record<string, string | undefined> = {
     HOME: '/home/node',
     SESSION_ID: sessionId,
+    MCP_PROXY_SCRIPT: MCP_PROXY_SCRIPT,
+    MCP_CONFIG: mcpConfigJson,
   };
   if (sessionUserId) {
     containerEnv.USER_ID = sessionUserId;

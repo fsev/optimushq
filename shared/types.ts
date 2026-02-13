@@ -12,6 +12,7 @@ export interface Project {
   auto_summarize: number;
   dev_port: number | null;
   server_config: string;
+  agent_image: string;
   created_at: string;
   updated_at: string;
 }

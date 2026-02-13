@@ -5,11 +5,17 @@ import { fileURLToPath } from 'url';
 import { getDb } from '../db/connection.js';
 import { getToken } from '../routes/settings.js';
 import { decryptEnv } from '../routes/mcps.js';
+import { spawnDockerAgent, type DockerSpawnResult } from './docker-spawn.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MCP_CONFIG_PATH = path.join(__dirname, '..', '..', '..', 'mcp-config.json');
 const activeProcesses = new Map<string, ChildProcess>();
+const activeContainers = new Map<string, DockerSpawnResult>();
 const killedSessions = new Set<string>();
+
+function isDockerMode(): boolean {
+  return process.env.AGENT_MODE === 'docker';
+}
 
 function generateMcpConfig(): string {
   const db = getDb();
@@ -20,9 +26,22 @@ function generateMcpConfig(): string {
   const mcpServers: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};
   for (const s of servers) {
     const key = s.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    let parsedArgs = JSON.parse(s.args) as string[];
+
+    // When running in Docker mode, rewrite Chrome DevTools browserUrl
+    // to use the Docker network hostname instead of localhost
+    if (isDockerMode() && key === 'chrome-devtools') {
+      const chromeHost = process.env.CHROME_HOST || 'chrome';
+      const chromePort = process.env.CHROME_PORT || '9222';
+      parsedArgs = parsedArgs.map(arg =>
+        arg.replace(/http:\/\/127\.0\.0\.1:\d+/, `http://${chromeHost}:${chromePort}`)
+          .replace(/http:\/\/localhost:\d+/, `http://${chromeHost}:${chromePort}`)
+      );
+    }
+
     const entry: { command: string; args: string[]; env?: Record<string, string> } = {
       command: s.command,
-      args: JSON.parse(s.args),
+      args: parsedArgs,
     };
     const env = decryptEnv(s.env);
     if (Object.keys(env).length > 0) entry.env = env;
@@ -62,6 +81,7 @@ export function spawnClaude(
   options: SpawnOptions,
   onEvent: EventHandler,
   projectPath?: string | null,
+  agentImage?: string,
 ) {
   // Kill any existing process for this session
   killProcess(sessionId);
@@ -102,8 +122,145 @@ export function spawnClaude(
   args.push('--', userMessage);
 
   console.log(`[SPAWN] Running: claude ${args.map(a => a.length > 80 ? a.substring(0, 80) + '...' : a).join(' ')}`);
-  console.log(`[SPAWN] Args count: ${args.length}`);
+  console.log(`[SPAWN] Args count: ${args.length}, mode=${isDockerMode() ? 'docker' : 'bare-metal'}`);
 
+  if (isDockerMode()) {
+    spawnClaudeDocker(sessionId, args, options, onEvent, projectPath, agentImage);
+  } else {
+    spawnClaudeLocal(sessionId, args, options, onEvent, projectPath);
+  }
+}
+
+// ---- Docker container spawn ----
+
+function spawnClaudeDocker(
+  sessionId: string,
+  args: string[],
+  options: SpawnOptions,
+  onEvent: EventHandler,
+  projectPath?: string | null,
+  agentImage?: string,
+) {
+  const db = getDb();
+  const sessionOwner = db.prepare('SELECT user_id FROM sessions WHERE id = ?').get(sessionId) as { user_id: string } | undefined;
+  const sessionUserId = sessionOwner?.user_id;
+
+  // Build env vars to pass into the container
+  const containerEnv: Record<string, string | undefined> = {
+    HOME: '/home/node',
+    SESSION_ID: sessionId,
+  };
+  if (sessionUserId) {
+    containerEnv.USER_ID = sessionUserId;
+  }
+  if (projectPath) {
+    containerEnv.PROJECT_PATH = '/workspace';
+  }
+  const githubToken = getToken('token_github', sessionUserId);
+  if (githubToken) {
+    containerEnv.GITHUB_TOKEN = githubToken;
+  }
+
+  // Determine agent image: explicit > project setting > env default
+  let image = agentImage;
+  if (!image) {
+    // Try to get project-level agent_image
+    const projRow = db.prepare(`
+      SELECT p.agent_image FROM sessions s JOIN projects p ON s.project_id = p.id WHERE s.id = ?
+    `).get(sessionId) as { agent_image: string | null } | undefined;
+    if (projRow?.agent_image) {
+      image = projRow.agent_image;
+    }
+  }
+
+  spawnDockerAgent(sessionId, args, {
+    projectPath,
+    agentImage: image || undefined,
+    env: containerEnv,
+  }).then((result) => {
+    activeContainers.set(sessionId, result);
+
+    let buffer = '';
+    let fullText = '';
+    let stderrText = '';
+    const toolInteractions: { tool: string; input: unknown; result?: string }[] = [];
+
+    result.stdout.on('data', (data: Buffer) => {
+      const chunk = data.toString();
+      console.log(`[SPAWN-DOCKER] stdout chunk (${chunk.length} bytes): ${chunk.substring(0, 200)}`);
+      buffer += chunk;
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          console.log(`[SPAWN-DOCKER] Parsed event type=${event.type} subtype=${event.subtype || ''}`);
+          processEvent(event, sessionId, onEvent, (t) => { fullText += t; }, toolInteractions);
+        } catch (e: any) {
+          console.log(`[SPAWN-DOCKER] Failed to parse line: ${line.substring(0, 100)} err=${e.message}`);
+        }
+      }
+    });
+
+    result.stderr.on('data', (data: Buffer) => {
+      const chunk = data.toString();
+      console.log(`[SPAWN-DOCKER] stderr: ${chunk.substring(0, 500)}`);
+      stderrText += chunk;
+    });
+
+    // When stdout stream ends, the container has exited
+    result.stdout.on('end', () => {
+      console.log(`[SPAWN-DOCKER] Container stream ended, fullText.length=${fullText.length}`);
+      activeContainers.delete(sessionId);
+
+      // Process remaining buffer
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer);
+          processEvent(event, sessionId, onEvent, (t) => { fullText += t; }, toolInteractions);
+        } catch {
+          // ignore
+        }
+      }
+
+      // Handle killed sessions
+      if (killedSessions.has(sessionId)) {
+        killedSessions.delete(sessionId);
+        if (fullText) {
+          console.log(`[SPAWN-DOCKER] Emitting synthetic done for killed session ${sessionId}`);
+          onEvent({ type: 'done', content: fullText, interrupted: true });
+        }
+        return;
+      }
+
+      // If we never got a 'done' event and have no text, it was an error
+      if (!fullText && stderrText) {
+        onEvent({ type: 'error', content: stderrText });
+      }
+    });
+
+    result.stderr.on('end', () => {
+      // stderr finished — no action needed, stdout 'end' handles cleanup
+    });
+
+  }).catch((err) => {
+    console.error(`[SPAWN-DOCKER] Failed to create container:`, err.message);
+    onEvent({ type: 'error', content: `Docker spawn failed: ${err.message}` });
+  });
+}
+
+// ---- Local (bare-metal) spawn ----
+
+function spawnClaudeLocal(
+  sessionId: string,
+  args: string[],
+  options: SpawnOptions,
+  onEvent: EventHandler,
+  projectPath?: string | null,
+) {
   // Get session's user_id for per-user settings
   const db = getDb();
   const sessionOwner = db.prepare('SELECT user_id FROM sessions WHERE id = ?').get(sessionId) as { user_id: string } | undefined;
@@ -275,6 +432,18 @@ function processEvent(
 }
 
 export function killProcess(sessionId: string): boolean {
+  // Try Docker container first
+  const container = activeContainers.get(sessionId);
+  if (container) {
+    killedSessions.add(sessionId);
+    activeContainers.delete(sessionId);
+    container.kill().catch((err) => {
+      console.error(`[SPAWN] Docker container kill error:`, err.message);
+    });
+    return true;
+  }
+
+  // Fallback to local process
   const child = activeProcesses.get(sessionId);
   if (child) {
     killedSessions.add(sessionId);

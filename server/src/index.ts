@@ -9,6 +9,7 @@ import { createSchema } from './db/schema.js';
 import { seed } from './db/seed.js';
 import { getDb } from './db/connection.js';
 import { setupWebSocket } from './ws/handler.js';
+import { cleanupOrphanedAgents } from './claude/docker-spawn.js';
 import projectsRouter from './routes/projects.js';
 import sessionsRouter from './routes/sessions.js';
 import agentsRouter from './routes/agents.js';
@@ -132,6 +133,13 @@ seed();
 
 // Set up security hook for project isolation
 setupPathValidationHook();
+
+// Clean up orphaned agent containers from previous runs (Docker mode only)
+if (process.env.AGENT_MODE === 'docker') {
+  cleanupOrphanedAgents().catch(err => {
+    console.error('[INIT] Failed to clean up orphaned agents:', err.message);
+  });
+}
 
 const app = express();
 

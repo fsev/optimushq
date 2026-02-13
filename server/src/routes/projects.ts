@@ -73,12 +73,12 @@ router.post('/', (req: Request, res: Response) => {
 
 router.put('/:id', (req: Request, res: Response) => {
   const userId = req.user!.id;
-  const { name, description, path, git_origin_url, git_push_disabled, git_protected_branches, color, auto_summarize, dev_port, server_config } = req.body;
+  const { name, description, path, git_origin_url, git_push_disabled, git_protected_branches, color, auto_summarize, dev_port, server_config, agent_image } = req.body;
   const db = getDb();
   const existing = db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(req.params.id, userId);
   if (!existing) return res.status(404).json({ error: 'Not found' });
-  db.prepare("UPDATE projects SET name = COALESCE(?, name), description = COALESCE(?, description), path = COALESCE(?, path), git_origin_url = COALESCE(?, git_origin_url), git_push_disabled = COALESCE(?, git_push_disabled), git_protected_branches = COALESCE(?, git_protected_branches), color = COALESCE(?, color), auto_summarize = COALESCE(?, auto_summarize), dev_port = COALESCE(?, dev_port), server_config = COALESCE(?, server_config), updated_at = datetime('now') WHERE id = ? AND user_id = ?")
-    .run(name ?? null, description ?? null, path ?? null, git_origin_url ?? null, git_push_disabled ?? null, git_protected_branches ?? null, color ?? null, auto_summarize ?? null, dev_port ?? null, server_config ?? null, req.params.id, userId);
+  db.prepare("UPDATE projects SET name = COALESCE(?, name), description = COALESCE(?, description), path = COALESCE(?, path), git_origin_url = COALESCE(?, git_origin_url), git_push_disabled = COALESCE(?, git_push_disabled), git_protected_branches = COALESCE(?, git_protected_branches), color = COALESCE(?, color), auto_summarize = COALESCE(?, auto_summarize), dev_port = COALESCE(?, dev_port), server_config = COALESCE(?, server_config), agent_image = COALESCE(?, agent_image), updated_at = datetime('now') WHERE id = ? AND user_id = ?")
+    .run(name ?? null, description ?? null, path ?? null, git_origin_url ?? null, git_push_disabled ?? null, git_protected_branches ?? null, color ?? null, auto_summarize ?? null, dev_port ?? null, server_config ?? null, agent_image ?? null, req.params.id, userId);
   res.json(db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id));
 });
 

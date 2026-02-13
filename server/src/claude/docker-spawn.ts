@@ -157,10 +157,12 @@ export async function spawnDockerAgent(
   }
 
   // Container CMD: write MCP proxy script and config from env vars, then exec claude
+  // Use printf '%s\n' instead of echo — dash's echo interprets \n escape sequences,
+  // which corrupts the JavaScript in MCP_PROXY_SCRIPT.
   const cmd = [
     'sh', '-c',
-    'echo "$MCP_PROXY_SCRIPT" > /tmp/mcp-proxy.js && ' +
-    'echo "$MCP_CONFIG" > /tmp/mcp-config.json && ' +
+    'printf \'%s\\n\' "$MCP_PROXY_SCRIPT" > /tmp/mcp-proxy.js && ' +
+    'printf \'%s\\n\' "$MCP_CONFIG" > /tmp/mcp-config.json && ' +
     'exec claude "$@"',
     '--', ...args,
   ];

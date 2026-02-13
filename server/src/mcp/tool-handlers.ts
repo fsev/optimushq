@@ -40,6 +40,27 @@ function slugify(name: string): string {
     .substring(0, 60);
 }
 
+/**
+ * Resolve a project_id that may be a UUID or a project name.
+ * Returns the UUID, or throws if not found.
+ */
+function resolveProjectId(db: Database.Database, raw: string, userId: string | null): string {
+  // Try direct UUID lookup first
+  const byId = db.prepare('SELECT id FROM projects WHERE id = ?').get(raw) as { id: string } | undefined;
+  if (byId) return byId.id;
+
+  // Fallback: case-insensitive name match (scoped to user if available)
+  const query = userId
+    ? 'SELECT id FROM projects WHERE LOWER(name) = LOWER(?) AND user_id = ? LIMIT 1'
+    : 'SELECT id FROM projects WHERE LOWER(name) = LOWER(?) LIMIT 1';
+  const byName = userId
+    ? db.prepare(query).get(raw, userId) as { id: string } | undefined
+    : db.prepare(query).get(raw) as { id: string } | undefined;
+  if (byName) return byName.id;
+
+  throw new Error(`Project not found: ${raw}`);
+}
+
 function verifyProjectAccess(db: Database.Database, userId: string | null, projectId: string) {
   if (!userId) return;
   const row = db.prepare('SELECT user_id FROM projects WHERE id = ?').get(projectId) as { user_id: string | null } | undefined;
@@ -378,8 +399,9 @@ export function handleToolCall(
       }
 
       case 'get_project_memory': {
-        const projectId = args.project_id as string;
-        if (!projectId) throw new Error('project_id is required');
+        const rawProjectId = args.project_id as string;
+        if (!rawProjectId) throw new Error('project_id is required');
+        const projectId = resolveProjectId(db, rawProjectId, USER_ID);
         verifyProjectAccess(db, USER_ID, projectId);
 
         const row = db.prepare('SELECT summary FROM project_memory WHERE project_id = ?').get(projectId) as { summary: string | null } | undefined;
@@ -390,10 +412,11 @@ export function handleToolCall(
       }
 
       case 'update_project_memory': {
-        const projectId = args.project_id as string;
+        const rawProjectId = args.project_id as string;
         const summary = args.summary as string;
-        if (!projectId) throw new Error('project_id is required');
+        if (!rawProjectId) throw new Error('project_id is required');
         if (!summary) throw new Error('summary is required');
+        const projectId = resolveProjectId(db, rawProjectId, USER_ID);
         verifyProjectAccess(db, USER_ID, projectId);
 
         const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId) as { id: string } | undefined;
@@ -411,8 +434,9 @@ export function handleToolCall(
       }
 
       case 'get_server_config': {
-        const projectId = args.project_id as string;
-        if (!projectId) throw new Error('project_id is required');
+        const rawProjectId = args.project_id as string;
+        if (!rawProjectId) throw new Error('project_id is required');
+        const projectId = resolveProjectId(db, rawProjectId, USER_ID);
         verifyProjectAccess(db, USER_ID, projectId);
 
         const row = db.prepare('SELECT server_config FROM projects WHERE id = ?').get(projectId) as { server_config: string | null } | undefined;
@@ -424,10 +448,11 @@ export function handleToolCall(
       }
 
       case 'update_server_config': {
-        const projectId = args.project_id as string;
+        const rawProjectId = args.project_id as string;
         const serverConfig = args.server_config as string;
-        if (!projectId) throw new Error('project_id is required');
+        if (!rawProjectId) throw new Error('project_id is required');
         if (!serverConfig) throw new Error('server_config is required');
+        const projectId = resolveProjectId(db, rawProjectId, USER_ID);
         verifyProjectAccess(db, USER_ID, projectId);
 
         const proj = db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId) as { id: string } | undefined;
@@ -438,15 +463,16 @@ export function handleToolCall(
       }
 
       case 'add_memory_entry': {
-        const projectId = args.project_id as string;
+        const rawProjectId = args.project_id as string;
         const category = args.category as string;
         const title = args.title as string;
         const content = args.content as string;
         const tags = (args.tags as string) || '[]';
-        if (!projectId) throw new Error('project_id is required');
+        if (!rawProjectId) throw new Error('project_id is required');
         if (!category) throw new Error('category is required');
         if (!title) throw new Error('title is required');
         if (!content) throw new Error('content is required');
+        const projectId = resolveProjectId(db, rawProjectId, USER_ID);
         verifyProjectAccess(db, USER_ID, projectId);
 
         const validCategories = ['decision', 'feature', 'bug', 'content', 'todo', 'context'];
@@ -464,10 +490,12 @@ export function handleToolCall(
 
       case 'search_memory': {
         const query = args.query as string;
-        const projectId = args.project_id as string | undefined;
+        const rawProjectId = args.project_id as string | undefined;
         const category = args.category as string | undefined;
         const limit = (args.limit as number) || 20;
         if (!query) throw new Error('query is required');
+
+        const projectId = rawProjectId ? resolveProjectId(db, rawProjectId, USER_ID) : undefined;
 
         let sql = `
           SELECT me.id, me.category, me.title, me.content, me.tags, me.created_at, p.name as project_name
@@ -509,10 +537,11 @@ export function handleToolCall(
       }
 
       case 'list_memory_entries': {
-        const projectId = args.project_id as string;
+        const rawProjectId = args.project_id as string;
         const category = args.category as string | undefined;
         const limit = (args.limit as number) || 20;
-        if (!projectId) throw new Error('project_id is required');
+        if (!rawProjectId) throw new Error('project_id is required');
+        const projectId = resolveProjectId(db, rawProjectId, USER_ID);
         verifyProjectAccess(db, USER_ID, projectId);
 
         let sql = 'SELECT id, category, title, content, tags, created_at FROM memory_entries WHERE project_id = ?';
@@ -618,8 +647,9 @@ export function handleToolCall(
       }
 
       case 'get_project_status': {
-        const projectId = args.project_id as string;
-        if (!projectId) throw new Error('project_id is required');
+        const rawProjectId = args.project_id as string;
+        if (!rawProjectId) throw new Error('project_id is required');
+        const projectId = resolveProjectId(db, rawProjectId, USER_ID);
         verifyProjectAccess(db, USER_ID, projectId);
 
         const project = db.prepare('SELECT id, name, description, path FROM projects WHERE id = ?').get(projectId) as {
@@ -701,16 +731,17 @@ export function handleToolCall(
       }
 
       case 'delegate_task': {
-        const projectId = args.project_id as string;
+        const rawProjectId = args.project_id as string;
         const agentName = args.agent_name as string;
         const title = args.title as string;
         const instruction = args.instruction as string;
         const mode = (args.mode as string) || 'execute';
-        if (!projectId) throw new Error('project_id is required');
+        if (!rawProjectId) throw new Error('project_id is required');
         if (!agentName) throw new Error('agent_name is required');
         if (!title) throw new Error('title is required');
         if (!instruction) throw new Error('instruction is required');
 
+        const projectId = resolveProjectId(db, rawProjectId, USER_ID);
         verifyProjectAccess(db, USER_ID, projectId);
         const project = db.prepare('SELECT id, name FROM projects WHERE id = ?').get(projectId) as { id: string; name: string } | undefined;
         if (!project) throw new Error(`Project not found: ${projectId}`);
@@ -797,10 +828,11 @@ export function handleToolCall(
       }
 
       case 'read_project_file': {
-        const projectId = args.project_id as string;
+        const rawProjectId = args.project_id as string;
         const filePath = args.path as string;
-        if (!projectId) throw new Error('project_id is required');
+        if (!rawProjectId) throw new Error('project_id is required');
         if (!filePath) throw new Error('path is required');
+        const projectId = resolveProjectId(db, rawProjectId, USER_ID);
         verifyProjectAccess(db, USER_ID, projectId);
 
         const project = db.prepare('SELECT path FROM projects WHERE id = ?').get(projectId) as { path: string | null } | undefined;

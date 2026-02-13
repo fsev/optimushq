@@ -84,10 +84,12 @@ ${listing}`);
   const baseDomain = getBaseDomain();
   if (session.project_path) {
     const folderName = session.project_path.split('/').pop();
+    // In Docker mode, the project is bind-mounted at /workspace inside the agent container
+    const agentProjectPath = process.env.AGENT_MODE === 'docker' ? '/workspace' : session.project_path;
     envLines.unshift(
-      `- You are working on the "${session.project_name}" project`,
-      `- Project directory: ${session.project_path}`,
-      `- All code changes should be made inside ${session.project_path}`,
+      `- You are working on the "${session.project_name}" project (ID: ${session.project_id})`,
+      `- Project directory: ${agentProjectPath}`,
+      `- All code changes should be made inside ${agentProjectPath}`,
       `- When creating or modifying files, always work within the project directory`,
       `- CRITICAL: Port 3001 is reserved by the platform. NEVER kill processes on port 3001 or any other port you did not start. If a port is in use, pick another port in the 3100-3999 range instead of killing existing processes.`,
     );

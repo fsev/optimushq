@@ -52,6 +52,14 @@ services:
     networks:
       - optimushq-net
 
+  claude-agent:
+    build:
+      context: .
+      dockerfile: docker/agent/Dockerfile
+    image: claude-agent-react
+    profiles:
+      - build
+
   chrome:
     image: zenika/alpine-chrome:latest
     container_name: optimushq-chrome

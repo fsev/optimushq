@@ -30,7 +30,7 @@ export interface JsonRpcResponse {
 
 // ---- Tool definitions ------------------------------------------------------
 
-const PROJECTS_ROOT = '/home/claude/projects';
+const PROJECTS_ROOT = process.env.PROJECTS_ROOT || '/home/claude/projects';
 
 function slugify(name: string): string {
   return name

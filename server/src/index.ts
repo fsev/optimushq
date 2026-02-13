@@ -325,7 +325,7 @@ app.get('/api/logs', (req, res) => {
 });
 
 // Serve user projects: reverse proxy if dev_port set, otherwise static files
-const PROJECTS_DIR = '/home/claude/projects';
+const PROJECTS_DIR = process.env.PROJECTS_ROOT || '/home/claude/projects';
 app.use('/preview', (req, res, next) => {
   // Extract project folder name from URL: /preview/<folder>/...
   const match = req.path.match(/^\/([^/]+)/);

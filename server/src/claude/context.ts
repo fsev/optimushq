@@ -109,7 +109,7 @@ ${listing}`);
     }
   } else {
     envLines.unshift(
-      '- You can create projects in /home/claude/projects/<project-name>/',
+      `- You can create projects in ${process.env.PROJECTS_ROOT || '/home/claude/projects'}/<project-name>/`,
       `- Static files are served at https://${baseDomain}/preview/<project-name>/`,
       `- For dynamic apps, use subdomain: https://<project-name>.${baseDomain}/ (requires dev_port set on project)`,
       '- CRITICAL: Port 3001 is reserved by the platform. NEVER kill processes on port 3001. When running dev servers, use ports 3100-3999. If a port is in use, pick another port in that range instead of killing the existing process.',

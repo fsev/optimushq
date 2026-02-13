@@ -177,7 +177,7 @@ function migrate(db: ReturnType<typeof getDb>) {
 }
 
 function migrateProjectPaths(db: ReturnType<typeof getDb>) {
-  const PROJECTS_ROOT = '/home/claude/projects';
+  const PROJECTS_ROOT = process.env.PROJECTS_ROOT || '/home/claude/projects';
 
   // Check if migration is needed by looking for a marker or checking path structure
   const projects = db.prepare(`

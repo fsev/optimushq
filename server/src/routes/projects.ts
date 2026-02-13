@@ -6,7 +6,7 @@ import { execSync } from 'child_process';
 import { getDb } from '../db/connection.js';
 
 const router = Router();
-const PROJECTS_ROOT = '/home/claude/projects';
+const PROJECTS_ROOT = process.env.PROJECTS_ROOT || '/home/claude/projects';
 
 function slugify(name: string): string {
   return name
@@ -106,8 +106,9 @@ router.delete('/:id', (req: Request, res: Response) => {
 
     // Clean up Claude Code cache directories
     const cacheSlug = project.path.replace(/\//g, '-');
-    const claudeProjectCache = join('/home/claude/.claude/projects', cacheSlug);
-    const claudeCliCache = join('/home/claude/.cache/claude-cli-nodejs', cacheSlug);
+    const homeDir = process.env.HOME || '/home/claude';
+    const claudeProjectCache = join(homeDir, '.claude/projects', cacheSlug);
+    const claudeCliCache = join(homeDir, '.cache/claude-cli-nodejs', cacheSlug);
     try { rmSync(claudeProjectCache, { recursive: true, force: true }); } catch { /* ignore */ }
     try { rmSync(claudeCliCache, { recursive: true, force: true }); } catch { /* ignore */ }
   }

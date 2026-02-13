@@ -58,8 +58,7 @@ services:
       context: .
       dockerfile: docker/agent/Dockerfile
     image: claude-agent-react
-    profiles:
-      - build
+    command: "true"
 
   chrome:
     image: zenika/alpine-chrome:latest

@@ -48,6 +48,22 @@ function migrate(db: ReturnType<typeof getDb>) {
     db.exec("ALTER TABLE projects ADD COLUMN agent_image TEXT NOT NULL DEFAULT ''");
   }
 
+  // Add docker_image column to agents if missing
+  const agentCols = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+  if (!agentCols.some(c => c.name === 'docker_image')) {
+    db.exec("ALTER TABLE agents ADD COLUMN docker_image TEXT NOT NULL DEFAULT ''");
+  }
+
+  // Add worktree_path column to sessions if missing
+  if (!sessCols.some(c => c.name === 'worktree_path')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN worktree_path TEXT DEFAULT NULL");
+  }
+
+  // Add cc_session_id column to sessions (Claude Code resume session ID)
+  if (!sessCols.some(c => c.name === 'cc_session_id')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN cc_session_id TEXT DEFAULT NULL");
+  }
+
   // Add mode column to sessions if missing
   if (!sessCols.some(c => c.name === 'mode')) {
     db.exec("ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'execute'");

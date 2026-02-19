@@ -1,36 +1,47 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Plus, Edit2, Trash2, Save, X } from 'lucide-react';
+import { api } from '../../api/http';
 import type { Agent } from '../../../../shared/types';
 
 interface Props {
   agents: Agent[];
-  onCreate: (data: { name: string; system_prompt: string; icon: string }) => void;
+  onCreate: (data: { name: string; system_prompt: string; icon: string; docker_image: string }) => void;
   onUpdate: (id: string, data: Partial<Agent>) => void;
   onDelete: (id: string) => void;
+}
+
+interface AgentImage {
+  name: string;
+  fullTag: string;
 }
 
 export default function AgentManager({ agents, onCreate, onUpdate, onDelete }: Props) {
   const [showCreate, setShowCreate] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState({ name: '', system_prompt: '', icon: '🤖' });
+  const [form, setForm] = useState({ name: '', system_prompt: '', icon: '🤖', docker_image: '' });
+  const [availableImages, setAvailableImages] = useState<AgentImage[]>([]);
+
+  useEffect(() => {
+    api.get<AgentImage[]>('/agents/images').then(setAvailableImages).catch(() => {});
+  }, []);
 
   const handleCreate = () => {
     if (!form.name || !form.system_prompt) return;
     onCreate(form);
-    setForm({ name: '', system_prompt: '', icon: '🤖' });
+    setForm({ name: '', system_prompt: '', icon: '🤖', docker_image: '' });
     setShowCreate(false);
   };
 
   const startEdit = (a: Agent) => {
     setEditingId(a.id);
-    setForm({ name: a.name, system_prompt: a.system_prompt, icon: a.icon });
+    setForm({ name: a.name, system_prompt: a.system_prompt, icon: a.icon, docker_image: a.docker_image || '' });
   };
 
   const handleUpdate = () => {
     if (!editingId || !form.name || !form.system_prompt) return;
     onUpdate(editingId, form);
     setEditingId(null);
-    setForm({ name: '', system_prompt: '', icon: '🤖' });
+    setForm({ name: '', system_prompt: '', icon: '🤖', docker_image: '' });
   };
 
   return (
@@ -38,7 +49,7 @@ export default function AgentManager({ agents, onCreate, onUpdate, onDelete }: P
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xl font-bold text-white">Agents</h2>
         <button
-          onClick={() => { setShowCreate(true); setEditingId(null); setForm({ name: '', system_prompt: '', icon: '🤖' }); }}
+          onClick={() => { setShowCreate(true); setEditingId(null); setForm({ name: '', system_prompt: '', icon: '🤖', docker_image: '' }); }}
           className="flex items-center gap-1 px-3 py-1.5 bg-accent-600 hover:bg-accent-700 rounded text-sm text-white"
         >
           <Plus size={14} /> New Agent
@@ -68,6 +79,19 @@ export default function AgentManager({ agents, onCreate, onUpdate, onDelete }: P
             rows={4}
             className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-accent-500/50 resize-none mb-3"
           />
+          <div className="mb-3">
+            <label className="block text-xs text-gray-400 mb-1">Docker Image</label>
+            <select
+              value={form.docker_image}
+              onChange={(e) => setForm({ ...form, docker_image: e.target.value })}
+              className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-accent-500/50"
+            >
+              <option value="">Default</option>
+              {availableImages.map((img) => (
+                <option key={img.fullTag} value={img.name}>{img.name}</option>
+              ))}
+            </select>
+          </div>
           <div className="flex gap-2">
             <button
               onClick={editingId ? handleUpdate : handleCreate}
@@ -93,6 +117,7 @@ export default function AgentManager({ agents, onCreate, onUpdate, onDelete }: P
                 <span className="text-lg">{a.icon}</span>
                 <span className="font-medium text-white">{a.name}</span>
                 {a.is_default ? <span className="text-xs bg-accent-600/30 text-accent-400 px-1.5 py-0.5 rounded">default</span> : null}
+                {a.docker_image ? <span className="text-xs bg-blue-600/20 text-blue-400 px-1.5 py-0.5 rounded font-mono">{a.docker_image}</span> : null}
               </div>
               <p className="text-xs text-gray-400 mt-1 line-clamp-2">{a.system_prompt}</p>
             </div>

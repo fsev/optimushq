@@ -24,6 +24,7 @@ export interface Agent {
   icon: string;
   is_default: number;
   model: string;
+  docker_image: string;
   created_at: string;
   updated_at: string;
 }
@@ -57,6 +58,8 @@ export interface Session {
   status: SessionStatus;
   status_updated_at: string;
   mode: PermissionMode;
+  worktree_path: string | null;
+  cc_session_id: string | null;
   created_at: string;
   updated_at: string;
 }

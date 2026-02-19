@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { getDb } from '../db/connection.js';
 import { getToken } from '../routes/settings.js';
 import { decryptEnv } from '../routes/mcps.js';
-import { spawnDockerAgent, type DockerSpawnResult } from './docker-spawn.js';
+import { spawnDockerAgent, despawnAgentContainer, validateImageExists, type DockerSpawnResult } from './docker-spawn.js';
 import { MCP_PROXY_SCRIPT } from './mcp-proxy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -15,7 +15,7 @@ const activeContainers = new Map<string, DockerSpawnResult>();
 const killedSessions = new Set<string>();
 
 function isDockerMode(): boolean {
-  return process.env.AGENT_MODE === 'docker';
+  return process.env.AGENT_MODE !== 'local';
 }
 
 function generateMcpConfig(): string {
@@ -119,6 +119,8 @@ export interface StreamEvent {
   toolResult?: string;
   cost?: number;
   sessionId?: string;
+  /** CC's internal session ID for --resume */
+  ccSessionId?: string;
   interrupted?: boolean;
 }
 
@@ -131,10 +133,8 @@ export function spawnClaude(
   onEvent: EventHandler,
   projectPath?: string | null,
   agentImage?: string,
+  ccSessionId?: string | null,
 ) {
-  // Kill any existing process for this session
-  killProcess(sessionId);
-
   // In Docker mode, MCP config is delivered via env var and written to
   // /tmp/mcp-config.json inside the container.  In bare-metal mode,
   // we write the config to a file on disk.
@@ -142,17 +142,24 @@ export function spawnClaude(
     ? '/tmp/mcp-config.json'   // container-internal path
     : generateMcpConfig();     // host file path
 
+  const isResume = !!ccSessionId;
+
   const args = [
     '--print',
     '--output-format', 'stream-json',
     '--verbose',
     '--dangerously-skip-permissions',
     '--mcp-config', mcpConfigPath,
-    '--system-prompt', options.systemPrompt,
   ];
 
-  if (options.model) {
-    args.push('--model', options.model);
+  // On resume, CC already has the system prompt and model from the first invocation
+  if (isResume) {
+    args.push('--resume', ccSessionId!);
+  } else {
+    args.push('--system-prompt', options.systemPrompt);
+    if (options.model) {
+      args.push('--model', options.model);
+    }
   }
 
   if (options.thinking) {
@@ -175,7 +182,7 @@ export function spawnClaude(
   args.push('--', userMessage);
 
   console.log(`[SPAWN] Running: claude ${args.map(a => a.length > 80 ? a.substring(0, 80) + '...' : a).join(' ')}`);
-  console.log(`[SPAWN] Args count: ${args.length}, mode=${isDockerMode() ? 'docker' : 'bare-metal'}`);
+  console.log(`[SPAWN] Args count: ${args.length}, mode=${isDockerMode() ? 'docker' : 'bare-metal'}, resume=${isResume}`);
 
   if (isDockerMode()) {
     spawnClaudeDocker(sessionId, args, options, onEvent, projectPath, agentImage);
@@ -219,23 +226,39 @@ function spawnClaudeDocker(
     containerEnv.GITHUB_TOKEN = githubToken;
   }
 
-  // Determine agent image: explicit > project setting > env default
+  // Determine agent image: explicit param > agent's docker_image > project's agent_image > env default
   let image = agentImage;
   if (!image) {
-    // Try to get project-level agent_image
-    const projRow = db.prepare(`
-      SELECT p.agent_image FROM sessions s JOIN projects p ON s.project_id = p.id WHERE s.id = ?
-    `).get(sessionId) as { agent_image: string | null } | undefined;
-    if (projRow?.agent_image) {
-      image = projRow.agent_image;
+    // Try agent-level docker_image, then project-level agent_image
+    const imgRow = db.prepare(`
+      SELECT a.docker_image, p.agent_image FROM sessions s
+      JOIN agents a ON s.agent_id = a.id
+      JOIN projects p ON s.project_id = p.id
+      WHERE s.id = ?
+    `).get(sessionId) as { docker_image: string | null; agent_image: string | null } | undefined;
+    if (imgRow?.docker_image) {
+      image = imgRow.docker_image;
+    } else if (imgRow?.agent_image) {
+      image = imgRow.agent_image;
     }
   }
 
-  spawnDockerAgent(sessionId, args, {
-    projectPath,
-    agentImage: image || undefined,
-    env: containerEnv,
+  // Validate the image exists before attempting to spawn
+  const resolvedImage = image || process.env.AGENT_DEFAULT_IMAGE || 'claude-agent-base';
+  validateImageExists(resolvedImage).then((exists) => {
+    if (!exists) {
+      console.error(`[SPAWN-DOCKER] Image "${resolvedImage}" not found`);
+      onEvent({ type: 'error', content: `Agent Docker image "${resolvedImage}" not found.\n\nBuild it with: docker compose build\nOr set a different image on the agent settings.` });
+      return;
+    }
+
+    return spawnDockerAgent(sessionId, args, {
+      projectPath,
+      agentImage: image || undefined,
+      env: containerEnv,
+    });
   }).then((result) => {
+    if (!result) return; // Image validation failed
     activeContainers.set(sessionId, result);
 
     let buffer = '';
@@ -306,7 +329,13 @@ function spawnClaudeDocker(
 
   }).catch((err) => {
     console.error(`[SPAWN-DOCKER] Failed to create container:`, err.message);
-    onEvent({ type: 'error', content: `Docker spawn failed: ${err.message}` });
+    let errorMsg = `Docker spawn failed: ${err.message}`;
+    if (err.message?.includes('No such image')) {
+      errorMsg += '\n\nThe agent Docker image was not found. Build it with:\n  docker compose build claude-agent-base\nOr set AGENT_MODE=local to use bare-metal mode.';
+    } else if (err.message?.includes('socket')) {
+      errorMsg += '\n\nDocker socket is not accessible. Ensure Docker is running and the socket is mounted.\nOr set AGENT_MODE=local to use bare-metal mode.';
+    }
+    onEvent({ type: 'error', content: errorMsg });
   });
 }
 
@@ -428,7 +457,7 @@ function processEvent(
   toolInteractions: { tool: string; input: unknown; result?: string }[],
 ) {
   if (raw.type === 'system' && raw.subtype === 'init') {
-    onEvent({ type: 'init', sessionId: raw.session_id });
+    onEvent({ type: 'init', sessionId: raw.session_id, ccSessionId: raw.session_id });
     return;
   }
 

@@ -8,11 +8,12 @@ import { AuthContext } from '../../App';
 import { api, setImpersonateUserId, getImpersonateUserId } from '../../api/http';
 import { useMobileSidebar } from './MobileSidebar';
 import { useMobile } from '../../hooks/useMobile';
-import type { Project, Session } from '../../../../shared/types';
+import type { Agent, Project, Session } from '../../../../shared/types';
 
 interface Props {
   projects?: Project[];
   sessions?: Session[];
+  agents?: Agent[];
   selectedProjectId?: string | null;
   selectedSessionId?: string | null;
   onSelectProject?: (id: string) => void;
@@ -59,7 +60,7 @@ function NavItem({ to, icon, label, active, count, onClick }: { to: string; icon
 }
 
 export default function Sidebar({
-  projects: externalProjects, sessions = [], selectedProjectId, selectedSessionId,
+  projects: externalProjects, sessions = [], agents = [], selectedProjectId, selectedSessionId,
   onSelectProject, onSelectSession, onCreateProject, onCreateSession,
   onDeleteSession,
 }: Props) {
@@ -231,23 +232,34 @@ export default function Sidebar({
                 >
                   <MessageSquarePlus size={12} /> New Session
                 </button>
-                {sessions.filter(s => s.project_id === p.id).map((s) => (
-                  <div
-                    key={s.id}
-                    onClick={() => { onSelectSession?.(s.id); if (isMobile) closeSidebar(); }}
-                    className={`flex items-center justify-between px-3 py-1.5 cursor-pointer text-xs group transition-colors ${
-                      selectedSessionId === s.id ? 'text-accent-400' : 'text-gray-500 hover:text-gray-300'
-                    }`}
-                  >
-                    <span className="truncate">{s.title}</span>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onDeleteSession?.(s.id); }}
-                      className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-opacity"
+                {sessions.filter(s => s.project_id === p.id).map((s) => {
+                  const agent = agents.find(a => a.id === s.agent_id);
+                  return (
+                    <div
+                      key={s.id}
+                      onClick={() => { onSelectSession?.(s.id); if (isMobile) closeSidebar(); }}
+                      className={`flex items-center justify-between px-3 py-1.5 cursor-pointer text-xs group transition-colors ${
+                        selectedSessionId === s.id ? 'text-accent-400' : 'text-gray-500 hover:text-gray-300'
+                      }`}
                     >
-                      <Trash2 size={11} />
-                    </button>
-                  </div>
-                ))}
+                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                        {agent && <span className="flex-shrink-0" title={agent.name}>{agent.icon}</span>}
+                        <span className="truncate">{s.title}</span>
+                        {agent?.docker_image && (
+                          <span className="flex-shrink-0 text-[9px] bg-blue-600/20 text-blue-400 px-1 rounded font-mono" title={agent.docker_image}>
+                            {agent.docker_image.replace('claude-agent-', '')}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onDeleteSession?.(s.id); }}
+                        className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-opacity flex-shrink-0"
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

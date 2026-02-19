@@ -80,17 +80,27 @@ export default function Header({
         )}
 
         {sessionId && (
-          <select
-            value={selectedAgentId || ''}
-            onChange={(e) => onSelectAgent(e.target.value)}
-            className="text-xs bg-[#0d1117] border border-gray-700/50 rounded px-2 py-1 text-white focus:outline-none focus:border-accent-500/50"
-          >
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.icon} {a.name}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2">
+            <select
+              value={selectedAgentId || ''}
+              onChange={(e) => onSelectAgent(e.target.value)}
+              className="text-xs bg-[#0d1117] border border-gray-700/50 rounded px-2 py-1 text-white focus:outline-none focus:border-accent-500/50"
+            >
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.icon} {a.name}
+                </option>
+              ))}
+            </select>
+            {(() => {
+              const current = agents.find(a => a.id === selectedAgentId);
+              return current?.docker_image ? (
+                <span className="text-[10px] bg-blue-600/20 text-blue-400 px-1.5 py-0.5 rounded font-mono">
+                  {current.docker_image}
+                </span>
+              ) : null;
+            })()}
+          </div>
         )}
 
         {sessionId && onStatusChange && (

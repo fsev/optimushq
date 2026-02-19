@@ -56,9 +56,17 @@ rl.on('line', (line) => {
       case 'tools/list':
         send(handleToolsList(msg.id));
         break;
-      case 'tools/call':
-        send(handleToolCall(msg.id, msg.params, ctx));
+      case 'tools/call': {
+        const result = handleToolCall(msg.id, msg.params, ctx);
+        if (result instanceof Promise) {
+          result.then(send).catch((err: any) => {
+            send({ jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: err.message } });
+          });
+        } else {
+          send(result);
+        }
         break;
+      }
       default:
         if (msg.id !== undefined) {
           send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: `Method not found: ${msg.method}` } });

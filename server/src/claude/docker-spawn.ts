@@ -1,15 +1,18 @@
 import Docker from 'dockerode';
 import { PassThrough } from 'stream';
+import { getDb } from '../db/connection.js';
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
 export interface DockerSpawnResult {
   stdout: PassThrough;
   stderr: PassThrough;
-  /** Stop and remove the container */
+  /** Kill the current exec (not the container) */
   kill: () => Promise<void>;
   /** Container ID */
   containerId: string;
+  /** True if an existing container was reused (CC session data persists) */
+  containerReused: boolean;
 }
 
 /**
@@ -54,8 +57,59 @@ function getRuntime(): string | undefined {
   return process.env.AGENT_RUNTIME || undefined;
 }
 
+// ---- Persistent container management ---------------------------------------
+
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+interface PersistentContainer {
+  container: Docker.Container;
+  containerName: string;
+  idleTimer: ReturnType<typeof setTimeout>;
+}
+
+/** Persistent containers keyed by sessionId */
+const persistentContainers = new Map<string, PersistentContainer>();
+
+function resetIdleTimer(sessionId: string) {
+  const entry = persistentContainers.get(sessionId);
+  if (!entry) return;
+  clearTimeout(entry.idleTimer);
+  entry.idleTimer = setTimeout(() => despawnAgentContainer(sessionId), IDLE_TIMEOUT_MS);
+}
+
+/**
+ * Stop and remove a session's persistent container.
+ * Called on idle timeout, session done/delete, or server cleanup.
+ */
+export async function despawnAgentContainer(sessionId: string): Promise<void> {
+  const entry = persistentContainers.get(sessionId);
+  if (!entry) return;
+  clearTimeout(entry.idleTimer);
+  persistentContainers.delete(sessionId);
+
+  // Clear CC session ID — the session data is lost when the container goes away
+  try {
+    getDb().prepare("UPDATE sessions SET cc_session_id = NULL WHERE id = ?").run(sessionId);
+  } catch {
+    // DB may not be available during shutdown
+  }
+
+  try {
+    await entry.container.stop({ t: 5 }).catch(() => {});
+    await entry.container.remove({ force: true }).catch(() => {});
+    console.log(`[DOCKER-SPAWN] Despawned container ${entry.containerName}`);
+  } catch {
+    // Already gone
+  }
+}
+
 // ---- Main spawn function ---------------------------------------------------
 
+/**
+ * Ensure a persistent container exists for the session, then exec the claude
+ * command inside it. The container stays alive between messages and is
+ * despawned after IDLE_TIMEOUT_MS of inactivity.
+ */
 export async function spawnDockerAgent(
   sessionId: string,
   args: string[],
@@ -67,26 +121,145 @@ export async function spawnDockerAgent(
 ): Promise<DockerSpawnResult> {
   const image = opts.agentImage
     || process.env.AGENT_DEFAULT_IMAGE
-    || 'claude-agent-react';
+    || 'claude-agent-base';
 
   const containerName = `claude-agent-${sessionId}`;
 
+  // Reuse existing container or create a new one
+  let entry = persistentContainers.get(sessionId);
+
+  if (entry) {
+    // Verify container is still running
+    try {
+      const info = await entry.container.inspect();
+      if (!info.State.Running) {
+        // Container died — remove tracking and recreate
+        clearTimeout(entry.idleTimer);
+        persistentContainers.delete(sessionId);
+        await entry.container.remove({ force: true }).catch(() => {});
+        entry = undefined;
+      }
+    } catch {
+      if (entry) {
+        clearTimeout(entry.idleTimer);
+        persistentContainers.delete(sessionId);
+        entry = undefined;
+      }
+    }
+  }
+
+  let containerReused = false;
+  if (!entry) {
+    // Create a new persistent container
+    const container = await createPersistentContainer(sessionId, containerName, image, opts);
+    const idleTimer = setTimeout(() => despawnAgentContainer(sessionId), IDLE_TIMEOUT_MS);
+    entry = { container, containerName, idleTimer };
+    persistentContainers.set(sessionId, entry);
+    console.log(`[DOCKER-SPAWN] Container started: ${entry.container.id}`);
+  } else {
+    containerReused = true;
+    console.log(`[DOCKER-SPAWN] Reusing container ${containerName}`);
+    resetIdleTimer(sessionId);
+  }
+
+  // Build per-exec env vars (MCP config may change between messages)
+  const execEnv: string[] = [];
+  if (opts.env) {
+    for (const [k, v] of Object.entries(opts.env)) {
+      if (v !== undefined) execEnv.push(`${k}=${v}`);
+    }
+  }
+
+  // Exec claude command inside the persistent container
+  // Write MCP proxy/config files then run claude, same as before
+  const execCmd = [
+    'sh', '-c',
+    'printf \'%s\\n\' "$MCP_PROXY_SCRIPT" > /tmp/mcp-proxy.js && ' +
+    'printf \'%s\\n\' "$MCP_CONFIG" > /tmp/mcp-config.json && ' +
+    'exec claude "$@"',
+    '--', ...args,
+  ];
+
+  const exec = await entry.container.exec({
+    Cmd: execCmd,
+    Env: execEnv,
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+
+  const execStream = await exec.start({ hijack: true, stdin: false });
+
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  docker.modem.demuxStream(execStream, stdout, stderr);
+
+  // When the exec stream ends, close our passthrough streams
+  execStream.on('end', () => {
+    stdout.end();
+    stderr.end();
+    resetIdleTimer(sessionId);
+  });
+  execStream.on('error', () => {
+    stdout.end();
+    stderr.end();
+  });
+
+  // Get the exec PID so we can kill just this process (not the container)
+  let execPid: number | null = null;
+  try {
+    const inspectInfo = await exec.inspect();
+    execPid = inspectInfo.Pid || null;
+  } catch {
+    // Best effort
+  }
+
+  return {
+    stdout,
+    stderr,
+    containerId: entry.container.id,
+    containerReused,
+    kill: async () => {
+      // Kill just the exec process, not the container
+      if (execPid && entry) {
+        try {
+          console.log(`[DOCKER-SPAWN] Killing exec pid=${execPid} in ${containerName}`);
+          const killExec = await entry.container.exec({
+            Cmd: ['kill', '-TERM', String(execPid)],
+          });
+          await killExec.start({ hijack: true, stdin: false });
+        } catch (err: any) {
+          if (!err.message?.includes('No such container')) {
+            console.error(`[DOCKER-SPAWN] Exec kill error:`, err.message);
+          }
+        }
+      }
+    },
+  };
+}
+
+// ---- Container creation helper ---------------------------------------------
+
+async function createPersistentContainer(
+  sessionId: string,
+  containerName: string,
+  image: string,
+  opts: {
+    projectPath?: string | null;
+    env?: Record<string, string | undefined>;
+  },
+): Promise<Docker.Container> {
   // Build binds using HOST paths (critical for sibling container pattern)
   const hostProjectDir = opts.projectPath ? toHostPath(opts.projectPath) : null;
   const binds: string[] = [];
 
-  // Docker socket — only when explicitly opted in
   if (shouldMountDockerSocket()) {
     binds.push('/var/run/docker.sock:/var/run/docker.sock');
   }
-
   if (hostProjectDir) {
     binds.push(`${hostProjectDir}:/workspace`);
   }
 
-  // ---- Credential mounts (hardened) ----------------------------------------
-  // Mount only the subscription auth file read-only instead of the whole dir.
-  // The agent gets its own writable .claude/ for logs/cache.
+  // Credential mounts
   if (process.env.HOST_CLAUDE_DIR) {
     binds.push(`${process.env.HOST_CLAUDE_DIR}/.credentials.json:/home/node/.claude/.credentials.json:ro`);
   }
@@ -103,32 +276,23 @@ export async function spawnDockerAgent(
     binds.push(`${process.env.HOST_GITCONFIG}:/home/node/.gitconfig:ro`);
   }
 
-  // Build container environment
-  const containerEnv: string[] = [];
-  const envVars: Record<string, string | undefined> = {
-    GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME,
-    GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL,
-    GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME,
-    GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL,
-    ...opts.env,
-  };
-  for (const [k, v] of Object.entries(envVars)) {
-    if (v !== undefined) {
-      containerEnv.push(`${k}=${v}`);
-    }
-  }
+  // Container-level env vars (stable across messages)
+  const containerEnv: string[] = [
+    `HOME=/home/node`,
+    `GIT_AUTHOR_NAME=${process.env.GIT_AUTHOR_NAME || ''}`,
+    `GIT_AUTHOR_EMAIL=${process.env.GIT_AUTHOR_EMAIL || ''}`,
+    `GIT_COMMITTER_NAME=${process.env.GIT_COMMITTER_NAME || ''}`,
+    `GIT_COMMITTER_EMAIL=${process.env.GIT_COMMITTER_EMAIL || ''}`,
+  ];
 
-  // GroupAdd for docker GID only when socket is mounted
   const dockerGid = process.env.DOCKER_GID;
   const groupAdd = (shouldMountDockerSocket() && dockerGid) ? [dockerGid] : [];
 
-  // Ensure the Docker network exists (create if needed so agents work
-  // even when the platform is started outside docker-compose)
+  // Ensure network exists
   const NETWORK_NAME = 'optimushq-net';
   try {
     const nets = await docker.listNetworks({ filters: JSON.stringify({ name: [NETWORK_NAME] }) });
-    const exact = nets.find(n => n.Name === NETWORK_NAME);
-    if (!exact) {
+    if (!nets.find(n => n.Name === NETWORK_NAME)) {
       await docker.createNetwork({ Name: NETWORK_NAME, Driver: 'bridge' });
       console.log(`[DOCKER-SPAWN] Created network ${NETWORK_NAME}`);
     }
@@ -136,7 +300,6 @@ export async function spawnDockerAgent(
     console.error(`[DOCKER-SPAWN] Network check/create failed:`, err.message);
   }
 
-  // Resource limits
   const memoryLimit = parseMemoryLimit();
   const { CpuQuota, CpuPeriod } = parseCpuLimit();
   const pidsLimit = parsePidsLimit();
@@ -150,43 +313,33 @@ export async function spawnDockerAgent(
   // Remove any leftover container with the same name
   try {
     const old = docker.getContainer(containerName);
-    await old.stop({ t: 2 }).catch(() => {});
-    await old.remove({ force: true }).catch(() => {});
+    const info = await old.inspect().catch(() => null);
+    if (info) {
+      await old.stop({ t: 2 }).catch(() => {});
+      await old.remove({ force: true }).catch(() => {});
+    }
   } catch {
     // Container doesn't exist — expected
   }
 
-  // Container CMD: write MCP proxy script and config from env vars, then exec claude
-  // Use printf '%s\n' instead of echo — dash's echo interprets \n escape sequences,
-  // which corrupts the JavaScript in MCP_PROXY_SCRIPT.
-  const cmd = [
-    'sh', '-c',
-    'printf \'%s\\n\' "$MCP_PROXY_SCRIPT" > /tmp/mcp-proxy.js && ' +
-    'printf \'%s\\n\' "$MCP_CONFIG" > /tmp/mcp-config.json && ' +
-    'exec claude "$@"',
-    '--', ...args,
-  ];
-
   const container = await docker.createContainer({
     name: containerName,
     Image: image,
-    Cmd: cmd,
+    Cmd: ['sleep', 'infinity'],
     WorkingDir: '/workspace',
     Env: containerEnv,
-    AttachStdout: true,
-    AttachStderr: true,
     OpenStdin: false,
     Tty: false,
     NetworkingConfig: {
       EndpointsConfig: {
-        'optimushq-net': {},
+        [NETWORK_NAME]: {},
       },
     },
     HostConfig: {
       Binds: binds,
-      AutoRemove: true,
+      AutoRemove: false,
       GroupAdd: groupAdd,
-      NetworkMode: 'optimushq-net',
+      NetworkMode: NETWORK_NAME,
       Init: true,
       Memory: memoryLimit,
       CpuQuota,
@@ -197,52 +350,84 @@ export async function spawnDockerAgent(
   });
 
   console.log(`[DOCKER-SPAWN] Container created: ${container.id}`);
-
-  // Attach to stdout/stderr before starting
-  const attachStream = await container.attach({
-    stream: true,
-    stdout: true,
-    stderr: true,
-  });
-
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-
-  // Docker multiplexes stdout and stderr into a single stream.
-  // demuxStream splits them into separate streams.
-  docker.modem.demuxStream(attachStream, stdout, stderr);
-
-  // Start the container
   await container.start();
-  console.log(`[DOCKER-SPAWN] Container started: ${container.id}`);
 
-  // Handle container exit — close the streams so the caller knows we're done
+  // Watch for unexpected container death
   container.wait().then((result) => {
-    console.log(`[DOCKER-SPAWN] Container ${containerName} exited with code ${result.StatusCode}`);
-    stdout.end();
-    stderr.end();
-  }).catch((err) => {
-    console.error(`[DOCKER-SPAWN] Container wait error:`, err.message);
-    stdout.end();
-    stderr.end();
-  });
+    console.log(`[DOCKER-SPAWN] Container ${containerName} exited unexpectedly with code ${result.StatusCode}`);
+    const entry = persistentContainers.get(sessionId);
+    if (entry) {
+      clearTimeout(entry.idleTimer);
+      persistentContainers.delete(sessionId);
+    }
+  }).catch(() => {});
 
-  return {
-    stdout,
-    stderr,
-    containerId: container.id,
-    kill: async () => {
-      try {
-        console.log(`[DOCKER-SPAWN] Stopping container ${containerName}`);
-        await container.stop({ t: 5 });
-      } catch (err: any) {
-        // Container may already be stopped/removed (AutoRemove)
-        if (!err.message?.includes('not running') && !err.message?.includes('No such container')) {
-          console.error(`[DOCKER-SPAWN] Stop error:`, err.message);
-        }
-      }
-    },
+  return container;
+}
+
+// ---- Health check -----------------------------------------------------------
+
+export interface DockerHealthStatus {
+  socketConnected: boolean;
+  imageAvailable: boolean;
+  imageName: string;
+  networkExists: boolean;
+  error: string | null;
+}
+
+export async function checkDockerHealth(): Promise<DockerHealthStatus> {
+  const imageName = process.env.AGENT_DEFAULT_IMAGE || 'claude-agent-base';
+  const status: DockerHealthStatus = {
+    socketConnected: false,
+    imageAvailable: false,
+    imageName,
+    networkExists: false,
+    error: null,
   };
+
+  try {
+    await docker.ping();
+    status.socketConnected = true;
+  } catch (err: any) {
+    status.error = `Docker socket not accessible: ${err.message}\n` +
+      'Remediation: Ensure Docker is running and /var/run/docker.sock is mounted.\n' +
+      'If running locally, start Docker Desktop or the Docker daemon.\n' +
+      'If running in a container, mount -v /var/run/docker.sock:/var/run/docker.sock';
+    return status;
+  }
+
+  try {
+    await docker.getImage(imageName).inspect();
+    status.imageAvailable = true;
+  } catch (err: any) {
+    status.error = `Agent image "${imageName}" not found: ${err.message}\n` +
+      'Remediation: Build the agent image first:\n' +
+      '  docker compose build claude-agent-base\n' +
+      'Or build directly:\n' +
+      `  docker build -t ${imageName} -f docker/agent/base/Dockerfile .`;
+    return status;
+  }
+
+  try {
+    const nets = await docker.listNetworks({ filters: JSON.stringify({ name: ['optimushq-net'] }) });
+    status.networkExists = nets.some(n => n.Name === 'optimushq-net');
+    if (!status.networkExists) {
+      status.error = 'Docker network "optimushq-net" not found. It will be created automatically on first agent spawn.';
+    }
+  } catch (err: any) {
+    status.error = `Failed to check Docker networks: ${err.message}`;
+  }
+
+  return status;
+}
+
+export async function validateImageExists(imageName: string): Promise<boolean> {
+  try {
+    await docker.getImage(imageName).inspect();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

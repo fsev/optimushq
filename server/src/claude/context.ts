@@ -29,12 +29,14 @@ const EXPLORE_DISALLOWED_TOOLS = [
   'mcp__chrome-devtools__upload_file',
 ];
 
-export function assembleContext(sessionId: string, userMessage: string, modelOverride?: string, mode?: PermissionMode): ContextResult {
+export function assembleContext(sessionId: string, userMessage: string, modelOverride?: string, mode?: PermissionMode, resuming?: boolean): ContextResult {
   const db = getDb();
 
-  // Get agent info + project path
+  // Get agent info + project path (prefer worktree path if set)
   const session = db.prepare(`
-    SELECT a.system_prompt, a.name as agent_name, a.model, p.path as project_path, p.name as project_name, p.id as project_id, p.dev_port, p.server_config
+    SELECT a.system_prompt, a.name as agent_name, a.model,
+      COALESCE(s.worktree_path, p.path) as project_path,
+      p.name as project_name, p.id as project_id, p.dev_port, p.server_config
     FROM sessions s
     JOIN agents a ON s.agent_id = a.id
     JOIN projects p ON s.project_id = p.id
@@ -85,7 +87,7 @@ ${listing}`);
   if (session.project_path) {
     const folderName = session.project_path.split('/').pop();
     // In Docker mode, the project is bind-mounted at /workspace inside the agent container
-    const agentProjectPath = process.env.AGENT_MODE === 'docker' ? '/workspace' : session.project_path;
+    const agentProjectPath = process.env.AGENT_MODE !== 'local' ? '/workspace' : session.project_path;
     envLines.unshift(
       `- You are working on the "${session.project_name}" project (ID: ${session.project_id})`,
       `- Project directory: ${agentProjectPath}`,
@@ -214,17 +216,19 @@ ${listing}`);
     systemParts.push(`Session memory:\n${memory.summary}`);
   }
 
-  // Build full message with conversation history
-  const messages = db.prepare(
-    'SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?'
-  ).all(sessionId, MAX_HISTORY) as Pick<Message, 'role' | 'content'>[];
-
+  // Build full message — skip history when resuming a CC session (CC has its own context)
   const messageParts: string[] = [];
-  if (messages.length > 0) {
-    const history = messages.reverse().map(m =>
-      `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`
-    ).join('\n\n');
-    messageParts.push(`Previous conversation:\n${history}\n\n---\n`);
+  if (!resuming) {
+    const messages = db.prepare(
+      'SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(sessionId, MAX_HISTORY) as Pick<Message, 'role' | 'content'>[];
+
+    if (messages.length > 0) {
+      const history = messages.reverse().map(m =>
+        `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`
+      ).join('\n\n');
+      messageParts.push(`Previous conversation:\n${history}\n\n---\n`);
+    }
   }
   messageParts.push(userMessage);
 

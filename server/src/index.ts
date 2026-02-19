@@ -9,7 +9,7 @@ import { createSchema } from './db/schema.js';
 import { seed } from './db/seed.js';
 import { getDb } from './db/connection.js';
 import { setupWebSocket } from './ws/handler.js';
-import { cleanupOrphanedAgents } from './claude/docker-spawn.js';
+import { cleanupOrphanedAgents, checkDockerHealth } from './claude/docker-spawn.js';
 import projectsRouter from './routes/projects.js';
 import sessionsRouter from './routes/sessions.js';
 import agentsRouter from './routes/agents.js';
@@ -136,7 +136,7 @@ seed();
 setupPathValidationHook();
 
 // Clean up orphaned agent containers from previous runs (Docker mode only)
-if (process.env.AGENT_MODE === 'docker') {
+if (process.env.AGENT_MODE !== 'local') {
   cleanupOrphanedAgents().catch(err => {
     console.error('[INIT] Failed to clean up orphaned agents:', err.message);
   });
@@ -230,7 +230,24 @@ app.use('/api/internal', (req, res, next) => {
 app.use('/api/mcp-bridge', mcpBridgeRouter);
 
 // Health check (before auth middleware so it's always accessible)
-app.get('/api/health', (_req, res) => res.json({ ok: true }));
+app.get('/api/health', async (_req, res) => {
+  const mode = process.env.AGENT_MODE !== 'local' ? 'docker' : 'local';
+  if (mode === 'docker') {
+    const dockerStatus = await checkDockerHealth();
+    res.json({
+      ok: dockerStatus.socketConnected && dockerStatus.imageAvailable,
+      mode,
+      docker: {
+        socketConnected: dockerStatus.socketConnected,
+        imageAvailable: dockerStatus.imageAvailable,
+        imageName: dockerStatus.imageName,
+        networkExists: dockerStatus.networkExists,
+      },
+    });
+  } else {
+    res.json({ ok: true, mode });
+  }
+});
 
 // Auth middleware — protects all /api/* routes except /api/auth/login
 app.use(authMiddleware);
@@ -393,6 +410,37 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server });
 setupWebSocket(wss);
 
-server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+async function startServer() {
+  // Docker health check at startup
+  if (process.env.AGENT_MODE !== 'local') {
+    try {
+      const health = await checkDockerHealth();
+      if (!health.socketConnected) {
+        console.error('\n' + '='.repeat(60));
+        console.error('DOCKER HEALTH CHECK FAILED');
+        console.error('='.repeat(60));
+        console.error(health.error);
+        console.error('='.repeat(60) + '\n');
+        process.exit(1);
+      }
+      if (!health.imageAvailable) {
+        console.error('\n' + '='.repeat(60));
+        console.error('DOCKER HEALTH CHECK FAILED');
+        console.error('='.repeat(60));
+        console.error(health.error);
+        console.error('='.repeat(60) + '\n');
+        process.exit(1);
+      }
+      console.log(`[INIT] Docker health check passed: socket=ok image=${health.imageName} network=${health.networkExists ? 'ok' : 'will-create'}`);
+    } catch (err: any) {
+      console.error(`[INIT] Docker health check error: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  server.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT} (mode=${process.env.AGENT_MODE !== 'local' ? 'docker' : 'local'})`);
+  });
+}
+
+startServer();

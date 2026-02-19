@@ -63,8 +63,15 @@ router.post('/', (req: Request, res: Response) => {
       return res.json(handleInitialize(msg.id));
     case 'tools/list':
       return res.json(handleToolsList(msg.id));
-    case 'tools/call':
-      return res.json(handleToolCall(msg.id, msg.params, ctx));
+    case 'tools/call': {
+      const result = handleToolCall(msg.id, msg.params, ctx);
+      if (result instanceof Promise) {
+        return result.then(r => res.json(r)).catch(err => {
+          res.json({ jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: err.message } });
+        });
+      }
+      return res.json(result);
+    }
     default:
       return res.json({
         jsonrpc: '2.0',

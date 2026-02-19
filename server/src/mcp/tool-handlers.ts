@@ -299,6 +299,21 @@ export const TOOLS = [
       required: ['name'],
     },
   },
+  {
+    name: 'create_agent_image',
+    description: 'Build a new Docker image for agent containers. Creates a Dockerfile from the specified base image with additional packages and builds it via the Docker API.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Image name suffix (will be tagged as claude-agent-<name>)' },
+        base: { type: 'string', description: 'Base image to extend (default: claude-agent-base)' },
+        apt_packages: { type: 'string', description: 'Space-separated list of apt packages to install (optional)' },
+        npm_packages: { type: 'string', description: 'Space-separated list of npm packages to install globally (optional)' },
+        dockerfile_extra: { type: 'string', description: 'Additional Dockerfile instructions to append (optional)' },
+      },
+      required: ['name'],
+    },
+  },
 ];
 
 // ---- Handlers --------------------------------------------------------------
@@ -327,7 +342,7 @@ export function handleToolCall(
   id: number | string,
   params: { name: string; arguments?: Record<string, unknown> },
   ctx: McpContext,
-): JsonRpcResponse {
+): JsonRpcResponse | Promise<JsonRpcResponse> {
   const { name, arguments: args = {} } = params;
   const { db, userId: USER_ID, sessionId: SESSION_ID } = ctx;
 
@@ -850,6 +865,61 @@ export function handleToolCall(
 
         const fileContent = readFileSync(resolved, 'utf-8');
         return success(id, fileContent);
+      }
+
+      case 'create_agent_image': {
+        const imageName = args.name as string;
+        if (!imageName) throw new Error('name is required');
+        const baseName = (args.base as string) || 'claude-agent-base';
+        const aptPkgs = (args.apt_packages as string) || '';
+        const npmPkgs = (args.npm_packages as string) || '';
+        const extra = (args.dockerfile_extra as string) || '';
+
+        const tag = `claude-agent-${imageName.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
+
+        // Build Dockerfile content
+        const lines = [`FROM ${baseName}`, '', 'USER root', ''];
+        if (aptPkgs.trim()) {
+          lines.push(`RUN apt-get update && apt-get install -y --no-install-recommends ${aptPkgs.trim()} && rm -rf /var/lib/apt/lists/*`);
+          lines.push('');
+        }
+        if (npmPkgs.trim()) {
+          lines.push(`RUN npm install -g ${npmPkgs.trim()}`);
+          lines.push('');
+        }
+        if (extra.trim()) {
+          lines.push(extra.trim());
+          lines.push('');
+        }
+        lines.push('USER node', '', 'WORKDIR /workspace', '');
+        const dockerfile = lines.join('\n');
+
+        // Build using Docker API with tar-stream (async)
+        return (async () => {
+          try {
+            const Docker = (await import('dockerode')).default;
+            const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+            const { pack } = await import('tar-stream');
+
+            const tarStream = pack();
+            tarStream.entry({ name: 'Dockerfile' }, dockerfile);
+            tarStream.finalize();
+
+            const stream = await docker.buildImage(tarStream as any, { t: tag });
+
+            // Wait for build to complete
+            await new Promise<void>((resolve, reject) => {
+              docker.modem.followProgress(stream, (err: any) => {
+                if (err) reject(err);
+                else resolve();
+              });
+            });
+
+            return success(id, `Image built successfully.\n\nTag: ${tag}\nBase: ${baseName}\nDockerfile:\n\`\`\`\n${dockerfile}\`\`\`\n\nYou can now assign this image to agents via their settings.`);
+          } catch (err: any) {
+            return success(id, `Error: Failed to build image: ${err.message}`, true);
+          }
+        })();
       }
 
       case 'use_skill': {

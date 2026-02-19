@@ -21,6 +21,25 @@ function getProject(projectId: string, userId?: string): ProjectRow | null {
   return row ?? null;
 }
 
+/**
+ * Get the working directory for git operations.
+ * If a session_id is provided and the session has a worktree, use that instead.
+ */
+function getWorkingDir(projectId: string, sessionId?: string, userId?: string): string | null {
+  const project = getProject(projectId, userId);
+  if (!project?.path) return null;
+
+  if (sessionId) {
+    const db = getDb();
+    const session = db.prepare('SELECT worktree_path FROM sessions WHERE id = ?').get(sessionId) as { worktree_path: string | null } | undefined;
+    if (session?.worktree_path) {
+      return session.worktree_path;
+    }
+  }
+
+  return project.path;
+}
+
 function git(args: string, cwd: string): string {
   return execSync(`git ${args}`, { cwd, timeout: EXEC_TIMEOUT, encoding: 'utf-8' }).trim();
 }
@@ -36,21 +55,22 @@ function isGitRepo(cwd: string): boolean {
 
 // GET /status/:projectId
 router.get('/status/:projectId', (req: Request, res: Response) => {
-  const project = getProject(req.params.projectId, req.user!.id);
-  if (!project?.path) return res.status(404).json({ error: 'Project not found or has no path' });
+  const sessionId = req.query.session_id as string | undefined;
+  const cwd = getWorkingDir(req.params.projectId, sessionId, req.user!.id);
+  if (!cwd) return res.status(404).json({ error: 'Project not found or has no path' });
 
-  if (!isGitRepo(project.path)) {
+  if (!isGitRepo(cwd)) {
     return res.json({ isGitRepo: false });
   }
 
   try {
     let branch = 'main';
     try {
-      branch = git('rev-parse --abbrev-ref HEAD', project.path);
+      branch = git('rev-parse --abbrev-ref HEAD', cwd);
     } catch {
       // Fresh repo with no commits — fall back to default branch name
       try {
-        const symbolic = git('symbolic-ref --short HEAD', project.path);
+        const symbolic = git('symbolic-ref --short HEAD', cwd);
         if (symbolic) branch = symbolic;
       } catch { /* stick with 'main' */ }
     }
@@ -58,7 +78,7 @@ router.get('/status/:projectId', (req: Request, res: Response) => {
     let ahead = 0;
     let behind = 0;
     try {
-      const counts = git('rev-list --left-right --count HEAD...@{upstream}', project.path);
+      const counts = git('rev-list --left-right --count HEAD...@{upstream}', cwd);
       const parts = counts.split(/\s+/);
       ahead = parseInt(parts[0]) || 0;
       behind = parseInt(parts[1]) || 0;
@@ -66,7 +86,7 @@ router.get('/status/:projectId', (req: Request, res: Response) => {
       // No upstream configured or no commits yet
     }
 
-    const statusOutput = git('status --porcelain', project.path);
+    const statusOutput = git('status --porcelain', cwd);
     const files = statusOutput
       ? statusOutput.split('\n').map(line => {
           const indexStatus = line[0];
@@ -98,8 +118,9 @@ router.get('/status/:projectId', (req: Request, res: Response) => {
 
 // GET /diff/:projectId
 router.get('/diff/:projectId', (req: Request, res: Response) => {
-  const project = getProject(req.params.projectId, req.user!.id);
-  if (!project?.path) return res.status(404).json({ error: 'Project not found' });
+  const sessionId = req.query.session_id as string | undefined;
+  const cwd = getWorkingDir(req.params.projectId, sessionId, req.user!.id);
+  if (!cwd) return res.status(404).json({ error: 'Project not found' });
 
   const filePath = req.query.path as string;
   if (!filePath) return res.status(400).json({ error: 'path query param required' });
@@ -109,20 +130,20 @@ router.get('/diff/:projectId', (req: Request, res: Response) => {
   try {
     let diff: string;
     if (staged) {
-      diff = git(`diff --cached -- ${JSON.stringify(filePath)}`, project.path);
+      diff = git(`diff --cached -- ${JSON.stringify(filePath)}`, cwd);
     } else {
       // For untracked files, show the full content as a diff
       try {
-        git(`ls-files --error-unmatch -- ${JSON.stringify(filePath)}`, project.path);
-        diff = git(`diff -- ${JSON.stringify(filePath)}`, project.path);
+        git(`ls-files --error-unmatch -- ${JSON.stringify(filePath)}`, cwd);
+        diff = git(`diff -- ${JSON.stringify(filePath)}`, cwd);
       } catch {
         // Untracked file — show full content with + prefix
         try {
-          const content = git(`show :${filePath}`, project.path);
+          const content = git(`show :${filePath}`, cwd);
           diff = content;
         } catch {
           diff = execSync(`cat ${JSON.stringify(filePath)}`, {
-            cwd: project.path,
+            cwd,
             timeout: EXEC_TIMEOUT,
             encoding: 'utf-8',
           });
@@ -138,11 +159,12 @@ router.get('/diff/:projectId', (req: Request, res: Response) => {
 
 // GET /branches/:projectId
 router.get('/branches/:projectId', (req: Request, res: Response) => {
-  const project = getProject(req.params.projectId, req.user!.id);
-  if (!project?.path) return res.status(404).json({ error: 'Project not found' });
+  const sessionId = req.query.session_id as string | undefined;
+  const cwd = getWorkingDir(req.params.projectId, sessionId, req.user!.id);
+  if (!cwd) return res.status(404).json({ error: 'Project not found' });
 
   try {
-    const output = git('branch -a', project.path);
+    const output = git('branch -a', cwd);
     const branches = output.split('\n').filter(Boolean).map(line => {
       const current = line.startsWith('*');
       const name = line.replace(/^\*?\s+/, '').replace(/^remotes\//, '');
@@ -157,13 +179,14 @@ router.get('/branches/:projectId', (req: Request, res: Response) => {
 
 // GET /log/:projectId
 router.get('/log/:projectId', (req: Request, res: Response) => {
-  const project = getProject(req.params.projectId, req.user!.id);
-  if (!project?.path) return res.status(404).json({ error: 'Project not found' });
+  const sessionId = req.query.session_id as string | undefined;
+  const cwd = getWorkingDir(req.params.projectId, sessionId, req.user!.id);
+  if (!cwd) return res.status(404).json({ error: 'Project not found' });
 
   const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
 
   try {
-    const output = git(`log --format=%H%n%h%n%s%n%an%n%ai -n ${limit}`, project.path);
+    const output = git(`log --format=%H%n%h%n%s%n%an%n%ai -n ${limit}`, cwd);
     if (!output) return res.json([]);
 
     const lines = output.split('\n');
@@ -185,15 +208,16 @@ router.get('/log/:projectId', (req: Request, res: Response) => {
 
 // POST /stage/:projectId
 router.post('/stage/:projectId', (req: Request, res: Response) => {
-  const project = getProject(req.params.projectId, req.user!.id);
-  if (!project?.path) return res.status(404).json({ error: 'Project not found' });
+  const sessionId = req.query.session_id as string | undefined;
+  const cwd = getWorkingDir(req.params.projectId, sessionId, req.user!.id);
+  if (!cwd) return res.status(404).json({ error: 'Project not found' });
 
   const { paths } = req.body;
   if (!Array.isArray(paths) || paths.length === 0) return res.status(400).json({ error: 'paths array required' });
 
   try {
     const escaped = paths.map(p => JSON.stringify(p)).join(' ');
-    git(`add -- ${escaped}`, project.path);
+    git(`add -- ${escaped}`, cwd);
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -202,15 +226,16 @@ router.post('/stage/:projectId', (req: Request, res: Response) => {
 
 // POST /unstage/:projectId
 router.post('/unstage/:projectId', (req: Request, res: Response) => {
-  const project = getProject(req.params.projectId, req.user!.id);
-  if (!project?.path) return res.status(404).json({ error: 'Project not found' });
+  const sessionId = req.query.session_id as string | undefined;
+  const cwd = getWorkingDir(req.params.projectId, sessionId, req.user!.id);
+  if (!cwd) return res.status(404).json({ error: 'Project not found' });
 
   const { paths } = req.body;
   if (!Array.isArray(paths) || paths.length === 0) return res.status(400).json({ error: 'paths array required' });
 
   try {
     const escaped = paths.map(p => JSON.stringify(p)).join(' ');
-    git(`reset HEAD -- ${escaped}`, project.path);
+    git(`reset HEAD -- ${escaped}`, cwd);
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -219,14 +244,15 @@ router.post('/unstage/:projectId', (req: Request, res: Response) => {
 
 // POST /commit/:projectId
 router.post('/commit/:projectId', (req: Request, res: Response) => {
-  const project = getProject(req.params.projectId, req.user!.id);
-  if (!project?.path) return res.status(404).json({ error: 'Project not found' });
+  const sessionId = req.query.session_id as string | undefined;
+  const cwd = getWorkingDir(req.params.projectId, sessionId, req.user!.id);
+  if (!cwd) return res.status(404).json({ error: 'Project not found' });
 
   const { message } = req.body;
   if (!message || typeof message !== 'string') return res.status(400).json({ error: 'message string required' });
 
   try {
-    git(`commit -m ${JSON.stringify(message)}`, project.path);
+    git(`commit -m ${JSON.stringify(message)}`, cwd);
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -235,14 +261,15 @@ router.post('/commit/:projectId', (req: Request, res: Response) => {
 
 // POST /checkout/:projectId
 router.post('/checkout/:projectId', (req: Request, res: Response) => {
-  const project = getProject(req.params.projectId, req.user!.id);
-  if (!project?.path) return res.status(404).json({ error: 'Project not found' });
+  const sessionId = req.query.session_id as string | undefined;
+  const cwd = getWorkingDir(req.params.projectId, sessionId, req.user!.id);
+  if (!cwd) return res.status(404).json({ error: 'Project not found' });
 
   const { branch } = req.body;
   if (!branch || typeof branch !== 'string') return res.status(400).json({ error: 'branch string required' });
 
   try {
-    git(`checkout ${JSON.stringify(branch)}`, project.path);
+    git(`checkout ${JSON.stringify(branch)}`, cwd);
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -251,11 +278,12 @@ router.post('/checkout/:projectId', (req: Request, res: Response) => {
 
 // POST /pull/:projectId
 router.post('/pull/:projectId', (req: Request, res: Response) => {
-  const project = getProject(req.params.projectId, req.user!.id);
-  if (!project?.path) return res.status(404).json({ error: 'Project not found' });
+  const sessionId = req.query.session_id as string | undefined;
+  const cwd = getWorkingDir(req.params.projectId, sessionId, req.user!.id);
+  if (!cwd) return res.status(404).json({ error: 'Project not found' });
 
   try {
-    const output = git('pull', project.path);
+    const output = git('pull', cwd);
     res.json({ ok: true, output });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -266,6 +294,8 @@ router.post('/pull/:projectId', (req: Request, res: Response) => {
 router.post('/push/:projectId', (req: Request, res: Response) => {
   const project = getProject(req.params.projectId, req.user!.id);
   if (!project?.path) return res.status(404).json({ error: 'Project not found' });
+  const sessionId = req.query.session_id as string | undefined;
+  const cwd = getWorkingDir(req.params.projectId, sessionId, req.user!.id) || project.path;
 
   // Enforce git_push_disabled
   if (project.git_push_disabled) {
@@ -275,7 +305,7 @@ router.post('/push/:projectId', (req: Request, res: Response) => {
   // Enforce protected branches
   if (project.git_protected_branches) {
     try {
-      const currentBranch = git('rev-parse --abbrev-ref HEAD', project.path);
+      const currentBranch = git('rev-parse --abbrev-ref HEAD', cwd);
       const protectedList = project.git_protected_branches.split(',').map(b => b.trim()).filter(Boolean);
       if (protectedList.includes(currentBranch)) {
         return res.status(403).json({ error: `Push to protected branch "${currentBranch}" is not allowed` });
@@ -286,7 +316,7 @@ router.post('/push/:projectId', (req: Request, res: Response) => {
   }
 
   try {
-    const output = git('push', project.path);
+    const output = git('push', cwd);
     res.json({ ok: true, output });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

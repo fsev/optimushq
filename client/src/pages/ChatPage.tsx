@@ -193,6 +193,7 @@ export default function ChatPage() {
         <Sidebar
           projects={projects}
           sessions={sessions}
+          agents={agents}
           selectedProjectId={selectedProjectId}
           selectedSessionId={selectedSessionId}
           onSelectProject={(id) => { setSelectedProjectId(id); setSelectedSessionId(null); setSearchParams({ project: id }); }}
@@ -246,7 +247,7 @@ export default function ChatPage() {
         <FileExplorer projectId={selectedProjectId} />
       )}
       {activeView === 'source_control' && hasProject && selectedProjectId && currentProject && (
-        <SourceControl projectId={selectedProjectId} project={currentProject} />
+        <SourceControl projectId={selectedProjectId} project={currentProject} sessionId={selectedSessionId || undefined} />
       )}
     </MainLayout>
   );

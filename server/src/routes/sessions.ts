@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuid } from 'uuid';
 import { getDb } from '../db/connection.js';
+import { removeWorktree } from '../claude/worktree.js';
+import { despawnAgentContainer } from '../claude/docker-spawn.js';
 
 const router = Router();
 
@@ -81,12 +83,51 @@ router.patch('/:id/status', (req: Request, res: Response) => {
   db.prepare("UPDATE sessions SET status = ?, status_updated_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND user_id = ?")
     .run(status, req.params.id, userId);
   logActivity(req.params.id, `moved`, actor, fromStatus, status);
+
+  // Despawn agent container when session moves to 'done'
+  if (status === 'done') {
+    despawnAgentContainer(req.params.id).catch(() => {});
+  }
+
+  // Clean up worktree when session moves to 'done'
+  if (status === 'done' && existing.worktree_path) {
+    const projRow = db.prepare('SELECT path FROM projects WHERE id = ?').get(existing.project_id) as { path: string | null } | undefined;
+    if (projRow?.path) {
+      try {
+        removeWorktree(req.params.id, projRow.path);
+        db.prepare("UPDATE sessions SET worktree_path = NULL WHERE id = ?").run(req.params.id);
+      } catch (err: any) {
+        console.error(`[SESSION] Worktree cleanup on done failed: ${err.message}`);
+      }
+    }
+  }
+
   res.json(db.prepare('SELECT * FROM sessions WHERE id = ?').get(req.params.id));
 });
 
 router.delete('/:id', (req: Request, res: Response) => {
   const userId = req.user!.id;
-  getDb().prepare('DELETE FROM sessions WHERE id = ? AND user_id = ?').run(req.params.id, userId);
+  const db = getDb();
+
+  // Clean up worktree before deleting session
+  const session = db.prepare(`
+    SELECT s.worktree_path, p.path as project_path
+    FROM sessions s JOIN projects p ON s.project_id = p.id
+    WHERE s.id = ? AND s.user_id = ?
+  `).get(req.params.id, userId) as { worktree_path: string | null; project_path: string | null } | undefined;
+
+  // Despawn agent container
+  despawnAgentContainer(req.params.id).catch(() => {});
+
+  if (session?.worktree_path && session.project_path) {
+    try {
+      removeWorktree(req.params.id, session.project_path);
+    } catch (err: any) {
+      console.error(`[SESSION] Worktree cleanup failed: ${err.message}`);
+    }
+  }
+
+  db.prepare('DELETE FROM sessions WHERE id = ? AND user_id = ?').run(req.params.id, userId);
   res.status(204).end();
 });
 

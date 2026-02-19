@@ -4,6 +4,7 @@ import { spawn as cpSpawn } from 'child_process';
 import { getDb } from '../db/connection.js';
 import { assembleContext } from '../claude/context.js';
 import { spawnClaude, killProcess } from '../claude/spawn.js';
+import { needsWorktree, createWorktree } from '../claude/worktree.js';
 import type { WsClientMessage, WsServerMessage, PermissionMode } from '../../../shared/types.js';
 
 // Track actively streaming sessions
@@ -332,11 +333,33 @@ export function saveUserMessage(sessionId: string, content: string) {
 export function spawnForSession(sessionId: string, content: string, images?: string[], model?: string, thinking?: boolean, mode?: PermissionMode) {
   const db = getDb();
 
-  // Get project path for this session (used for path validation in hooks)
-  const sessionProject = db.prepare(`
-    SELECT p.path FROM sessions s JOIN projects p ON s.project_id = p.id WHERE s.id = ?
-  `).get(sessionId) as { path: string | null } | undefined;
-  const projectPath = sessionProject?.path || null;
+  // Get project path, worktree, and CC session ID for resume
+  const sessionInfo = db.prepare(`
+    SELECT p.path, s.worktree_path, s.mode as session_mode, s.cc_session_id
+    FROM sessions s JOIN projects p ON s.project_id = p.id WHERE s.id = ?
+  `).get(sessionId) as { path: string | null; worktree_path: string | null; session_mode: string; cc_session_id: string | null } | undefined;
+  const rawProjectPath = sessionInfo?.path || null;
+  const effectiveMode = mode || sessionInfo?.session_mode;
+  const ccSessionId = sessionInfo?.cc_session_id || null;
+
+  // Resolve effective path: use existing worktree, create one if needed, or use project path
+  let projectPath = rawProjectPath;
+  if (rawProjectPath) {
+    if (sessionInfo?.worktree_path) {
+      // Reuse existing worktree
+      projectPath = sessionInfo.worktree_path;
+    } else if (needsWorktree(sessionId, rawProjectPath, effectiveMode)) {
+      try {
+        const worktreePath = createWorktree(sessionId, rawProjectPath);
+        db.prepare("UPDATE sessions SET worktree_path = ? WHERE id = ?").run(worktreePath, sessionId);
+        projectPath = worktreePath;
+        console.log(`[WORKTREE] Created worktree for session ${sessionId}: ${worktreePath}`);
+      } catch (err: any) {
+        console.error(`[WORKTREE] Failed to create worktree: ${err.message}`);
+        // Fall back to main project path
+      }
+    }
+  }
 
   // Build message for Claude -- append image references if present
   let claudeContent = content;
@@ -348,9 +371,9 @@ export function spawnForSession(sessionId: string, content: string, images?: str
   // Assemble context
   let ctx: ReturnType<typeof assembleContext>;
   try {
-    ctx = assembleContext(sessionId, claudeContent, model, mode);
+    ctx = assembleContext(sessionId, claudeContent, model, mode, !!ccSessionId);
     console.log(`[CHAT] Context assembled: model=${ctx.model}, systemPrompt=${ctx.systemPrompt.substring(0, 80)}...`);
-    console.log(`[CHAT] Full message length: ${ctx.fullMessage.length}`);
+    console.log(`[CHAT] Full message length: ${ctx.fullMessage.length}, resume=${!!ccSessionId}`);
   } catch (err: any) {
     console.error(`[CHAT] Context assembly error:`, err.message);
     broadcastToSessionOwner(sessionId, { type: 'chat:error', sessionId, error: err.message });
@@ -363,7 +386,7 @@ export function spawnForSession(sessionId: string, content: string, images?: str
 
   streamingSessions.add(sessionId);
 
-  console.log(`[CHAT] Spawning claude... projectPath=${projectPath}`);
+  console.log(`[CHAT] Spawning claude... projectPath=${projectPath} ccSessionId=${ccSessionId || 'new'}`);
   try {
   spawnClaude(
     sessionId,
@@ -378,6 +401,13 @@ export function spawnForSession(sessionId: string, content: string, images?: str
     },
     (event) => {
       switch (event.type) {
+        case 'init':
+          // Save CC session ID for --resume on subsequent messages
+          if (event.ccSessionId) {
+            db.prepare("UPDATE sessions SET cc_session_id = ? WHERE id = ?").run(event.ccSessionId, sessionId);
+          }
+          break;
+
         case 'text':
           fullText += event.content || '';
           broadcastToSessionOwner(sessionId, { type: 'chat:chunk', sessionId, content: event.content || '' });
@@ -483,6 +513,8 @@ export function spawnForSession(sessionId: string, content: string, images?: str
       }
     },
     projectPath,
+    undefined, // agentImage — resolved inside spawnClaudeDocker
+    ccSessionId,
   );
   } catch (err: any) {
     console.error(`[CHAT] spawnClaude threw synchronously:`, err.message);

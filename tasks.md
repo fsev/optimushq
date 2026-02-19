@@ -13,20 +13,72 @@ Spawn each Claude agent session as an isolated Docker sibling container instead 
 - [x] Build agent image alongside platform in `docker compose up --build` (`26c782e`)
 - [x] Fix Docker agent pathing and MCP tool resolution issues (`eb9bf31`)
 
+### Default to Docker Mode
+Docker mode is the primary runtime. `AGENT_MODE` no longer needs to be set — Docker is the default. Set `AGENT_MODE=local` to use bare-metal mode.
+
+- [x] Change `AGENT_MODE` default from `local` to `docker` — `isDockerMode()` now returns `process.env.AGENT_MODE !== 'local'`
+- [x] Update `context.ts` and `index.ts` to use `!== 'local'` pattern consistently
+- [x] Remove explicit `AGENT_MODE=docker` from `docker-compose.yml` (now redundant)
+- [x] Add startup Docker health check — verifies socket, image, and network on boot; exits with clear remediation on failure
+- [x] Surface Docker errors in the UI — enhanced error messages for "No such image" and socket failures
+- [x] Add `/api/health` endpoint with Docker status: `{ ok, mode, docker: { socketConnected, imageAvailable, imageName, networkExists } }`
+- [x] Change default image from `claude-agent-react` to `claude-agent-base`
+- [x] Move agent Dockerfile to `docker/agent/base/Dockerfile`
+- [x] Set up vitest test infrastructure (config, test script, `__tests__` directory)
+- [x] Add tests for `isDockerMode()` and `checkDockerHealth()`
+
+### Per-Agent Docker Images
+Each agent persona can specify which Docker image it runs in. Images are resolved in priority order: explicit param > agent's `docker_image` > project's `agent_image` > env default > `claude-agent-base`.
+
+- [x] Add `docker_image` column to agents table (DB migration in `schema.ts`)
+- [x] Add `docker_image` to `Agent` type in `shared/types.ts`
+- [x] Update agent CRUD routes — `docker_image` in POST/PUT, `GET /images` endpoint
+- [x] Update image resolution chain in `spawn.ts` — agent > project > env > default
+- [x] Add `validateImageExists()` — checks image before spawning, surfaces clear error if missing
+- [x] Create per-stack Dockerfiles: `base`, `node`, `python`, `browser`, `flutter`
+- [x] Update `docker-compose.yml` with build-only services for each image
+- [x] Update Agent UI — image dropdown in create/edit form, image badge on agent cards
+- [x] Add `create_agent_image` MCP tool — builds custom images from base + packages via Docker API
+- [x] Add image resolution priority tests
+
+### Git Worktree Isolation for Concurrent Sessions
+When multiple write sessions target the same project, each gets its own git worktree for isolated file changes. Explore sessions share the main checkout.
+
+- [x] Create `server/src/claude/worktree.ts` — `needsWorktree`, `createWorktree`, `removeWorktree`, `getSessionWorkPath`, `cleanupStaleWorktrees`
+- [x] Add `worktree_path` column to sessions table (DB migration in `schema.ts`)
+- [x] Add `worktree_path` to `Session` type in `shared/types.ts`
+- [x] Integrate worktree creation at spawn time in `ws/handler.ts` — checks `needsWorktree()`, creates if needed, stores path
+- [x] Update `context.ts` to use `COALESCE(s.worktree_path, p.path)` for effective project path
+- [x] Update all git routes to accept `?session_id=` and use worktree path via `getWorkingDir()`
+- [x] Update `useGit` hook to accept optional `sessionId` and pass on all API calls
+- [x] Update `SourceControl` component to accept and forward `sessionId`
+- [x] Add worktree cleanup on session DELETE and status → `done`
+- [x] Auto-append `.worktrees` to project `.gitignore`
+- [x] Skip worktree for explore mode and single-session projects
+- [x] Add tests for worktree lifecycle (create, remove, isolation, fallback)
+
 ### Key Files
-- `docker-compose.yml` — 3-service stack (platform, agent, chrome)
+- `docker-compose.yml` — Multi-service stack (platform, agent images, chrome)
 - `docker/platform/Dockerfile` — Express/WebSocket server container
-- `docker/agent/Dockerfile` — Lightweight agent container image
-- `server/src/claude/docker-spawn.ts` — Core container spawn logic with host path translation and resource limits
-- `server/src/claude/mcp-proxy.ts` — Proxies MCP tool calls from agent containers to the platform
-- `server/src/routes/mcp-bridge.ts` — HTTP bridge endpoint for cross-container MCP communication
-- `server/src/mcp/tool-handlers.ts` — Extracted MCP tool handler logic (refactored out of project-manager-mcp.ts)
+- `docker/agent/base/Dockerfile` — Base agent container (Node 22 + git + Claude CLI)
+- `docker/agent/{node,python,browser,flutter}/Dockerfile` — Specialized agent images
+- `server/src/claude/docker-spawn.ts` — Container spawn, health check, image validation
+- `server/src/claude/spawn.ts` — Agent spawning with Docker/local mode detection and image resolution
+- `server/src/claude/worktree.ts` — Git worktree lifecycle management
+- `server/src/claude/context.ts` — System prompt assembly with worktree-aware paths
+- `server/src/ws/handler.ts` — WebSocket handler with worktree integration at spawn time
+- `server/src/routes/git.ts` — Git operations with session-aware working directory
+- `server/src/routes/sessions.ts` — Session CRUD with worktree cleanup
+- `server/src/mcp/tool-handlers.ts` — MCP tools including `create_agent_image`
+- `client/src/components/agents/AgentManager.tsx` — Agent UI with image selector
+- `client/src/hooks/useGit.ts` — Git hook with session-aware API calls
+- `client/src/components/git/SourceControl.tsx` — Source control UI with session support
 
 ### Configuration
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AGENT_MODE` | Set to `docker` to enable containerized agents | (local) |
-| `AGENT_DEFAULT_IMAGE` | Docker image for agent containers | `claude-agent-react` |
+| `AGENT_MODE` | Set to `local` to disable Docker agents | (docker) |
+| `AGENT_DEFAULT_IMAGE` | Docker image for agent containers | `claude-agent-base` |
 | `AGENT_MEMORY_LIMIT` | Memory limit per agent container | 4 GB |
 | `AGENT_CPU_LIMIT` | CPU limit per agent container | 2 CPUs |
 | `AGENT_PIDS_LIMIT` | PID limit per agent container | 512 |
@@ -36,39 +88,4 @@ Spawn each Claude agent session as an isolated Docker sibling container instead 
 
 ## Pending
 
-### Git Worktree Isolation for Concurrent Sessions
-When multiple sessions target the same project, they currently share the same working directory. Two write sessions will conflict — edits from one agent get overwritten by the other. Use git worktrees to give each session its own isolated checkout.
-
-- [ ] On session start, create a git worktree for the session (e.g., `.worktrees/<session-id>`) on a new branch
-- [ ] Update `spawn.ts` and `docker-spawn.ts` to set `cwd` / bind mount to the worktree path instead of the main project dir
-- [ ] Update `context.ts` to pass the worktree path instead of the project root
-- [ ] Handle worktree cleanup on session end/delete — prune worktrees and delete branches for closed sessions
-- [ ] Skip worktree creation for read-only (Explore) sessions — they can safely share the main checkout
-- [ ] Update git routes (`routes/git.ts`) and SourceControl UI to be worktree-aware (show correct branch, status for the session's worktree)
-- [ ] Handle the "first session" / "only session" case — no worktree needed if only one active write session exists on a project
-- [ ] Add tests for worktree lifecycle (create, use, cleanup)
-
-### Default to Docker Mode
-Docker mode is our primary runtime. Switch the default from local to docker so `AGENT_MODE` doesn't need to be explicitly set.
-
-- [ ] Change `AGENT_MODE` default from `local` to `docker` in `spawn.ts` (`isDockerMode()`)
-- [ ] Update `docker-compose.yml` — remove the explicit `AGENT_MODE=docker` env var (now redundant)
-- [ ] Update README and configuration table in `tasks.md` to reflect the new default
-- [ ] Add `AGENT_MODE=local` escape hatch documentation for anyone who needs bare-metal mode
-- [ ] Add startup Docker health check — on server boot, verify Docker socket is accessible and agent image exists. If either fails, log a clear error with remediation steps (not just a silent fallback to local)
-- [ ] Surface Docker errors in the UI — when a container fails to start, send the error back to the chat as a visible system message instead of only logging to server stdout
-- [ ] Add a `/health` or status endpoint that reports whether Docker mode is operational (socket connected, image available, network exists)
-
-### Per-Agent Docker Images
-Different agents need different toolchains — a dev agent needs Node/Flutter SDKs, a QA agent needs test runners and browsers, a product agent just needs a lightweight shell. Images are configured per agent, not per project, so the same project can run multiple agents with different images.
-
-- [ ] Add `docker_image` column to the `agents` table — each agent persona specifies which image it runs in
-- [ ] Add image selector to agent settings UI (dropdown of available images)
-- [ ] Update `docker-spawn.ts` to resolve the image from the session's agent instead of the global `AGENT_DEFAULT_IMAGE`
-- [ ] Create a base agent Dockerfile (`claude-agent-base`) that all images extend (Claude CLI + common tools), with per-stack Dockerfiles inheriting from it
-- [ ] Ship default images: `claude-agent-node` (Node/React/Next), `claude-agent-flutter` (Flutter SDK), `claude-agent-python` (Python/pip), `claude-agent-browser` (Playwright/Puppeteer), `claude-agent-base` (minimal)
-- [ ] Add API endpoint to list available agent images from Docker (`docker images` filtered by naming convention, e.g., `claude-agent-*`)
-- [ ] Add UI for building new images — user provides a Dockerfile (or picks a base + installs), platform builds it via Docker API and tags it with `claude-agent-<name>`
-- [ ] Add an MCP tool (`create_agent_image`) so agents can build new images conversationally — describe what tools you need and the agent writes the Dockerfile and builds it
-- [ ] Validate the image exists before session start — if the agent's image is missing, surface a clear error in the UI
-- [ ] Allow per-project image override — project settings can pin a default image that overrides the agent's image (for projects where every agent needs the same stack)
+(none)

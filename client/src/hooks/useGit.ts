@@ -2,12 +2,14 @@ import { useState, useCallback } from 'react';
 import { api } from '../api/http';
 import type { GitStatusResult, GitBranch, GitLogEntry, GitDiffResult } from '../../../shared/types';
 
-export function useGit(projectId: string | null) {
+export function useGit(projectId: string | null, sessionId?: string | null) {
   const [status, setStatus] = useState<GitStatusResult | null>(null);
   const [branches, setBranches] = useState<GitBranch[]>([]);
   const [log, setLog] = useState<GitLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const qs = sessionId ? `?session_id=${sessionId}` : '';
 
   const refresh = useCallback(async () => {
     if (!projectId) return;
@@ -15,9 +17,9 @@ export function useGit(projectId: string | null) {
     setError(null);
     try {
       const [s, b, l] = await Promise.all([
-        api.get<GitStatusResult>(`/git/status/${projectId}`),
-        api.get<GitBranch[]>(`/git/branches/${projectId}`).catch(() => []),
-        api.get<GitLogEntry[]>(`/git/log/${projectId}`).catch(() => []),
+        api.get<GitStatusResult>(`/git/status/${projectId}${qs}`),
+        api.get<GitBranch[]>(`/git/branches/${projectId}${qs}`).catch(() => []),
+        api.get<GitLogEntry[]>(`/git/log/${projectId}${qs}`).catch(() => []),
       ]);
       setStatus(s);
       setBranches(b);
@@ -27,67 +29,67 @@ export function useGit(projectId: string | null) {
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, qs]);
 
   const stage = useCallback(async (paths: string[]) => {
     if (!projectId) return;
     try {
-      await api.post(`/git/stage/${projectId}`, { paths });
+      await api.post(`/git/stage/${projectId}${qs}`, { paths });
       await refresh();
     } catch (err: any) {
       setError(err.message);
     }
-  }, [projectId, refresh]);
+  }, [projectId, qs, refresh]);
 
   const unstage = useCallback(async (paths: string[]) => {
     if (!projectId) return;
     try {
-      await api.post(`/git/unstage/${projectId}`, { paths });
+      await api.post(`/git/unstage/${projectId}${qs}`, { paths });
       await refresh();
     } catch (err: any) {
       setError(err.message);
     }
-  }, [projectId, refresh]);
+  }, [projectId, qs, refresh]);
 
   const commit = useCallback(async (message: string) => {
     if (!projectId) return;
     try {
-      await api.post(`/git/commit/${projectId}`, { message });
+      await api.post(`/git/commit/${projectId}${qs}`, { message });
       await refresh();
     } catch (err: any) {
       setError(err.message);
     }
-  }, [projectId, refresh]);
+  }, [projectId, qs, refresh]);
 
   const checkout = useCallback(async (branch: string) => {
     if (!projectId) return;
     try {
-      await api.post(`/git/checkout/${projectId}`, { branch });
+      await api.post(`/git/checkout/${projectId}${qs}`, { branch });
       await refresh();
     } catch (err: any) {
       setError(err.message);
     }
-  }, [projectId, refresh]);
+  }, [projectId, qs, refresh]);
 
   const pull = useCallback(async () => {
     if (!projectId) return;
     try {
-      await api.post(`/git/pull/${projectId}`, {});
+      await api.post(`/git/pull/${projectId}${qs}`, {});
       await refresh();
     } catch (err: any) {
       setError(err.message);
     }
-  }, [projectId, refresh]);
+  }, [projectId, qs, refresh]);
 
   const push = useCallback(async () => {
     if (!projectId) return;
     try {
-      await api.post(`/git/push/${projectId}`, {});
+      await api.post(`/git/push/${projectId}${qs}`, {});
       await refresh();
     } catch (err: any) {
       setError(err.message);
     }
-  }, [projectId, refresh]);
+  }, [projectId, qs, refresh]);
 
   const init = useCallback(async () => {
     if (!projectId) return;
@@ -116,12 +118,12 @@ export function useGit(projectId: string | null) {
   const getDiff = useCallback(async (path: string, staged: boolean): Promise<GitDiffResult | null> => {
     if (!projectId) return null;
     try {
-      return await api.get<GitDiffResult>(`/git/diff/${projectId}?path=${encodeURIComponent(path)}&staged=${staged}`);
+      return await api.get<GitDiffResult>(`/git/diff/${projectId}?path=${encodeURIComponent(path)}&staged=${staged}${sessionId ? `&session_id=${sessionId}` : ''}`);
     } catch (err: any) {
       setError(err.message);
       return null;
     }
-  }, [projectId]);
+  }, [projectId, sessionId]);
 
   return { status, branches, log, loading, error, stage, unstage, commit, checkout, pull, push, getDiff, refresh, init, clone };
 }

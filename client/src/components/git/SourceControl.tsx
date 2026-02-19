@@ -6,6 +6,7 @@ import type { Project, GitFileStatus } from '../../../../shared/types';
 interface Props {
   projectId: string;
   project: Project;
+  sessionId?: string;
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -29,11 +30,11 @@ function statusColor(status: string): string {
   }
 }
 
-export default function SourceControl({ projectId, project }: Props) {
+export default function SourceControl({ projectId, project, sessionId }: Props) {
   const {
     status, branches, log, loading, error,
     stage, unstage, commit, checkout, pull, push, getDiff, refresh, init, clone,
-  } = useGit(projectId);
+  } = useGit(projectId, sessionId);
 
   const [commitMsg, setCommitMsg] = useState('');
   const [diffContent, setDiffContent] = useState<string | null>(null);
